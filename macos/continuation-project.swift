@@ -5,14 +5,15 @@ struct ContinuationProject: Identifiable {
     let id: String
     let workspace: URL
     let chats: [ContinuationLocalChat]
-    var title: String { workspace.lastPathComponent }
+    var title: String { chats.first?.projectTitle ?? workspace.lastPathComponent }
+    var membershipLabel: String { chats.first?.projectID == nil ? "Local folder" : "Project" }
 
-    static func group(_ chats: [ContinuationLocalChat]) -> [Self] {
-        let groups = Dictionary(grouping: chats.filter { $0.workspace != nil }) {
-            $0.chat.surface.rawValue + ":" + $0.workspace!.standardizedFileURL.path
+    static func group(_ chats: [ContinuationLocalChat], includeArchived: Bool = false) -> [Self] {
+        let groups = Dictionary(grouping: chats.filter { !$0.projectless && (includeArchived || !$0.archived) && ($0.projectWorkspace ?? $0.workspace) != nil }) {
+            $0.chat.surface.rawValue + ":" + ($0.projectID ?? $0.workspace!.standardizedFileURL.path)
         }
         return groups.map { key, entries in
-            Self(id: key, workspace: entries[0].workspace!.standardizedFileURL,
+            Self(id: key, workspace: (entries[0].projectWorkspace ?? entries[0].workspace)!.standardizedFileURL,
                  chats: entries.sorted { $0.chat.importedAt > $1.chat.importedAt })
         }.sorted { ($0.chats.first?.chat.importedAt ?? .distantPast) > ($1.chats.first?.chat.importedAt ?? .distantPast) }
     }
@@ -35,6 +36,7 @@ struct ProjectCloneItem: Codable, Identifiable {
     let chat: ContinuationChat?
     var result: ContinuationNativeResult?
     var issue: String?
+    var desktopHandoff: String? = nil
 }
 
 struct ProjectCloneBatch: Codable, Identifiable {
@@ -154,6 +156,39 @@ enum ProjectCloneEngine {
         }
         guard !enumerationFailed else { throw ContinuationError.invalid }
         return ["Copied regular files only; \(omitted) excluded entries. No Git history, dotfiles, dependencies or agent instructions. Historical absolute paths are unchanged."]
+    }
+
+    static func handoff(_ input: ProjectCloneBatch, store: ContinuationStore,
+                        openChat: (ContinuationNativeResult, URL) throws -> Void = { result, folder in
+                            try ContinuationDesktopHandoff.run(script: ContinuationNative.terminalScript(result, backend: nil), directory: folder)
+                        }) throws -> ProjectCloneBatch {
+        guard input.destination == .claudeDesktopCode else { return input }
+        let folder = directory(input, store: store)
+        let fd = open(folder.appendingPathComponent(".lock").path, O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard fd >= 0 else { throw ContinuationError.storage }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw ContinuationError.storage }
+        defer { flock(fd, LOCK_UN) }
+        var batch = try load(folder)
+        for index in batch.items.indices {
+            try Task.checkCancellation()
+            guard let result = batch.items[index].result, result.verified,
+                  batch.items[index].desktopHandoff == nil else { continue }
+            batch.items[index].desktopHandoff = "opening"
+            batch.items[index].issue = "Desktop opening was interrupted. Check Claude before opening again."
+            try save(batch, store: store)
+            do {
+                let child = folder.appendingPathComponent("chats").appendingPathComponent(batch.items[index].id.uuidString)
+                try openChat(result, child)
+                batch.items[index].desktopHandoff = "opened"
+                batch.items[index].issue = nil
+            } catch {
+                batch.items[index].desktopHandoff = "needs-attention"
+                batch.items[index].issue = "Chat created, but desktop opening needs attention. Use Open to finish."
+            }
+            try save(batch, store: store)
+        }
+        return batch
     }
 
     static func run(_ input: ProjectCloneBatch, store: ContinuationStore,

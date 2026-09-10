@@ -5,7 +5,13 @@ import SwiftUI
 final class ProjectCloneModel: ObservableObject {
     @Published var page = 1
     @Published var source: ContinuationSurface = .codexDesktop
-    @Published var destination: ContinuationSurface = .claudeCode
+    @Published var destination: ContinuationSurface = .claudeDesktopCode
+    @Published var includeArchived = false
+    private var catalog: [ContinuationLocalChat] = []
+    func regroup() {
+        projects = ContinuationProject.group(catalog, includeArchived: includeArchived)
+        if let selected = project { select(selected) } else { selectedID = nil; selectedChats = [] }
+    }
     @Published var projects: [ContinuationProject] = []
     @Published var selectedID: String?
     @Published var selectedChats = Set<String>()
@@ -22,7 +28,10 @@ final class ProjectCloneModel: ObservableObject {
     let opener = ContinuationModel()
     func stop() { worker?.cancel() }
     private func run(_ batch: ProjectCloneBatch) async throws -> ProjectCloneBatch {
-        let operation = Task.detached { [store] in try ProjectCloneEngine.run(batch, store: store) }
+        let operation = Task.detached { [store] in
+            let copied = try ProjectCloneEngine.run(batch, store: store)
+            return try ProjectCloneEngine.handoff(copied, store: store)
+        }
         worker = operation
         defer { worker = nil }
         do { return try await operation.value }
@@ -49,7 +58,7 @@ final class ProjectCloneModel: ObservableObject {
             defer { busy = false }
             do {
                 let entries = try await Task.detached { try ContinuationDiscovery.catalog(surface: surface, environment: environment) }.value
-                projects = ContinuationProject.group(entries); selectedID = nil; selectedChats = []
+                catalog = entries; selectedID = nil; selectedChats = []; regroup()
                 recent = try await Task.detached { [store] in try ProjectCloneEngine.recent(store: store) }.value
             } catch { message = "Could not read local projects. Try refreshing." }
         }
@@ -112,7 +121,7 @@ struct ProjectCloneView: View {
                     if model.page == 1 { choose }
                     else if model.page == 2 { review }
                     else { results }
-                    if model.busy { ProgressView("Preparing…").controlSize(.small) }
+                    if model.busy { ProgressView(model.page == 3 && model.destination == .claudeDesktopCode ? "Copying and opening in Claude…" : "Preparing…").controlSize(.small) }
                     if let message = model.message { Text(message).font(.caption) }
                     ProjectCloneOpeningStatus(model: model.opener)
                 }.padding(16)
@@ -122,7 +131,9 @@ struct ProjectCloneView: View {
                 if model.busy && model.page == 3 {
                     Button("Stop after this chat") { model.stop() }
                 } else {
-                    Button(model.page == 3 ? "Done" : "Cancel") { close() }.disabled(model.busy || model.opener.busy)
+                    Button(model.page == 3 ? "Done" : model.page == 2 ? "Back" : "Cancel") {
+                        if model.page == 2 { model.page = 1 } else { close() }
+                    }.disabled(model.busy || model.opener.busy)
                 }
                 Spacer()
                 if model.page == 1 {
@@ -151,7 +162,7 @@ struct ProjectCloneView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(project.title).fontWeight(.medium)
-                            Text("\(project.chats.count) chats · Local folder").font(.caption).foregroundStyle(.secondary)
+                            Text("\(project.chats.count) chats · \(project.membershipLabel)").font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
                         if model.selectedID == project.id { Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.accentColor) }
@@ -166,6 +177,8 @@ struct ProjectCloneView: View {
             DisclosureGroup("Advanced") {
                 VStack(alignment: .leading, spacing: 10) {
                     Button("Refresh projects") { model.refresh() }
+                    Toggle("Include archived chats", isOn: $model.includeArchived)
+                        .onChange(of: model.includeArchived) { _, _ in model.regroup() }
                     if let project = model.project {
                         Text(project.workspace.path).font(.caption).textSelection(.enabled)
                         TextField("Search chats…", text: $model.chatQuery).textFieldStyle(.roundedBorder)
@@ -175,7 +188,7 @@ struct ProjectCloneView: View {
                             }))
                         }
                     }
-                    Text("Other worktrees and cloud projects are separate. Unavailable chats are omitted. Up to 200 chats per copy.").font(.caption).foregroundStyle(.secondary)
+                    Text("Uses app project assignments when available; otherwise groups by folder. Archived chats are excluded by default. Unavailable chats are omitted. Up to 200 chats per copy.").font(.caption).foregroundStyle(.secondary)
                     if !model.recent.isEmpty {
                         Text("Previous copies").fontWeight(.medium)
                         ForEach(model.recent) { batch in
@@ -191,15 +204,16 @@ struct ProjectCloneView: View {
             Text("2 OF 2").font(.caption).foregroundStyle(.secondary)
             Text("Clone in…").font(.title3).fontWeight(.semibold)
             Picker("App", selection: $model.destination) {
-                ForEach(ContinuationSurface.allCases) { Text($0.title).tag($0) }
+                ForEach(ContinuationSurface.allCases.filter { $0 != .claudeChat }) { Text($0.title).tag($0) }
             }
-            if model.destination == .claudeChat { Text("Chat cannot import native history. Use the conversation tool for context handoff.").font(.caption).foregroundStyle(.secondary) }
+
             if model.destination == .codexDesktop || model.destination == .claudeDesktopCode {
                 Text("Chats are copied separately; desktop project grouping isn’t preserved.").font(.caption).foregroundStyle(.secondary)
             }
             DisclosureGroup("Advanced", isExpanded: $advanced) {
                 VStack(alignment: .leading, spacing: 10) {
                     TextField("Name", text: $model.name).textFieldStyle(.roundedBorder)
+                    Text("Claude Desktop uses its Code tab. Ordinary Claude Chat cannot import native history.").font(.caption).foregroundStyle(.secondary)
                     Picker("Project folder", selection: $model.mode) {
                         ForEach(ProjectFolderMode.allCases, id: \.self) { Text($0.title).tag($0) }
                     }

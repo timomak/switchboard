@@ -25,6 +25,19 @@ struct ProjectCloneTests {
         let project = ContinuationProject.group(entries)[0]
         let other = ContinuationLocalChat(chat: chats[0], location: .unavailable, workspace: root.appendingPathComponent("different/source"))
         check(ContinuationProject.group(entries + [other]).count == 2, "Same folder names do not merge projects")
+        var assigned = entries
+        for index in assigned.indices {
+            assigned[index].projectID = "brand-fixture"
+            assigned[index].projectTitle = "Brand fixture"
+            assigned[index].projectWorkspace = source
+        }
+        assigned[2].workspace = root.appendingPathComponent("older-location")
+        var archived = assigned[0]; archived.archived = true
+        let active = ContinuationProject.group(assigned + Array(repeating: archived, count: 17))
+        check(active.count == 1 && active[0].chats.count == 3, "Explicit membership includes other folder and excludes 17 archived chats")
+        check(ContinuationProject.group(assigned + [archived], includeArchived: true)[0].chats.count == 4, "Archives are an explicit option")
+        var projectless = assigned[0]; projectless.projectless = true
+        check(ContinuationProject.group([projectless]).isEmpty, "Explicit projectless chats do not fall back to a folder project")
         let store = ContinuationStore(root: root.appendingPathComponent("copies"))
         let selection = Set(chats.map(\.id))
         let batch = try ProjectCloneEngine.prepare(project: project, selected: selection, name: "Independent copy",
@@ -69,6 +82,14 @@ struct ProjectCloneTests {
             _ = try ProjectCloneEngine.prepare(project: project, selected: selection, name: "../escape", destination: .claudeCode, mode: .empty, store: store, read: { $0.chat })
             fatalError("Invalid name accepted")
         } catch ContinuationError.invalid { check(true, "Project name cannot escape copy directory") }
+        let desktop = try ProjectCloneEngine.prepare(project: project, selected: [chats[0].id], name: "Desktop",
+            destination: .claudeDesktopCode, mode: .empty, store: store, read: { $0.chat })
+        let persisted = try ProjectCloneEngine.run(desktop, store: store, create: creator)
+        var handoffs = 0
+        let opened = try ProjectCloneEngine.handoff(persisted, store: store, openChat: { _, _ in handoffs += 1 })
+        check(handoffs == 1 && opened.items[0].desktopHandoff == "opened", "Desktop destination performs handoff after persistence")
+        _ = try ProjectCloneEngine.handoff(persisted, store: store, openChat: { _, _ in fatalError("Repeated handoff") })
+        check(true, "Desktop handoff receipt prevents automatic repetition")
         print("✓ \(checks) project clone checks passed; isolated synthetic stores only.")
     }
 }

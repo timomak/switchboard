@@ -8,6 +8,11 @@ struct ContinuationLocalChat {
     var chat: ContinuationChat
     var location: Location
     var workspace: URL? = nil
+    var archived = false
+    var projectID: String? = nil
+    var projectTitle: String? = nil
+    var projectWorkspace: URL? = nil
+    var projectless = false
 }
 
 private final class ContinuationDatabase {
@@ -76,7 +81,9 @@ enum ContinuationDiscovery {
         let mode = columns.contains("history_mode") ? "history_mode" : "'legacy'"
         let cwd = columns.contains("cwd") ? "cwd" : "''"
         let origin = columns.contains("thread_source") ? "thread_source" : "''"
-        let rows = try db.rows("SELECT id, \(title), updated_at, rollout_path, source, \(mode), \(cwd), \(origin) FROM threads ORDER BY updated_at DESC")
+        let archived = columns.contains("archived") ? "archived" : "0"
+        let projects = surface == .codexDesktop ? try CodexLocalProjectMetadata.load(root: root) : nil
+        let rows = try db.rows("SELECT id, \(title), updated_at, rollout_path, source, \(mode), \(cwd), \(origin), \(archived) FROM threads ORDER BY updated_at DESC")
         let history = root.appendingPathComponent("thread_history_1.sqlite")
         return rows.compactMap { row in
             guard !row[4].contains("subagent"), row[4] != "exec" else { return nil }
@@ -86,10 +93,13 @@ enum ContinuationDiscovery {
             if row[5] == "paginated", fm.fileExists(atPath: history.path) { location = .history(history, row[0]) }
             else if fm.fileExists(atPath: path.path) { location = .session(path) }
             else { location = .unavailable }
+            let project = projects?.project(for: row[0])
             return .init(chat: .init(id: "local:\(surface.rawValue):\(row[0])", surface: surface,
                 title: row[1].isEmpty ? "Untitled conversation" : String(row[1].prefix(120)), messages: [], omissions: [],
                 importedAt: Date(timeIntervalSince1970: Double(row[2]) ?? 0)), location: location,
-                workspace: row[6].hasPrefix("/") ? URL(fileURLWithPath: row[6]) : nil)
+                workspace: row[6].hasPrefix("/") ? URL(fileURLWithPath: row[6]) : nil,
+                archived: row[8] == "1", projectID: project?.id, projectTitle: project?.name,
+                projectWorkspace: project?.root, projectless: projects?.excluded(row[0]) ?? false)
         }
     }
     private static func sessions(root: URL, surface: ContinuationSurface) throws -> [ContinuationLocalChat] {
@@ -176,5 +186,43 @@ enum ContinuationDiscovery {
         if chat.surface != .claudeCode { chat.title = entry.chat.title }
         chat.importedAt = entry.chat.importedAt
         return chat
+    }
+}
+
+/// Read only the versioned local-project metadata, never write desktop state.
+/// Explicit membership takes precedence over a chat's working directory.
+struct CodexLocalProjectMetadata {
+    struct Project {
+        let id: String
+        let name: String
+        let root: URL
+    }
+    let projects: [String: Project]
+    let assignments: [String: String]
+    let projectless: Set<String>
+    let nonLocal: Set<String>
+    func project(for thread: String) -> Project? { assignments[thread].flatMap { projects[$0] } }
+    func excluded(_ thread: String) -> Bool { projectless.contains(thread) || nonLocal.contains(thread) }
+    static func load(root: URL) throws -> Self? {
+        let path = root.appendingPathComponent(".codex-global-state.json")
+        guard FileManager.default.fileExists(atPath: path.path) else { return nil }
+        return try parse(ContinuationFiles.read(path, limit: ContinuationLimits.input))
+    }
+    static func parse(_ data: Data) throws -> Self? {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw ContinuationError.invalid }
+        guard let locals = object["local-projects"] as? [String: [String: Any]],
+              let assigned = object["thread-project-assignments"] as? [String: [String: Any]] else { return nil }
+        var projects: [String: Project] = [:], assignments: [String: String] = [:], nonLocal = Set<String>()
+        for (id, value) in locals {
+            guard let name = value["name"] as? String, let paths = value["rootPaths"] as? [String],
+                  let path = paths.first, path.hasPrefix("/") else { continue }
+            projects[id] = Project(id: id, name: name, root: URL(fileURLWithPath: path))
+        }
+        for (thread, value) in assigned {
+            if value["projectKind"] as? String == "local", let id = value["projectId"] as? String, projects[id] != nil { assignments[thread] = id }
+            else { nonLocal.insert(thread) }
+        }
+        return Self(projects: projects, assignments: assignments,
+                    projectless: Set(object["projectless-thread-ids"] as? [String] ?? []), nonLocal: nonLocal)
     }
 }

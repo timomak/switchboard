@@ -1,22 +1,28 @@
 # Clone project
 
 “Clone project…” is a companion to “Continue in another app…”. Choose a local
-folder project, then a destination. The second step contains the destination and
+folder project, then a destination. The second step contains the destination, a footer Back button and
 collapsed Advanced options. Name, folder mode, chat exclusions and omission details
 stay under Advanced; the primary action carries the selected chat count.
 
-Discovery groups chats by source surface and recorded working directory. It does
-not reconstruct desktop project registries, multi-root membership, related worktrees
-or cloud projects. All discovered chats in the folder are selected initially.
+Codex Desktop discovery reads explicit local project assignments and project names
+from its version-sensitive local metadata. Assigned chats stay in their project even
+when their working folder differs. Archived chats are excluded by default; Advanced
+can include them. Explicit projectless/non-local assignments are not grouped by folder.
+Other sources and older metadata schemas fall back to recorded working directories.
+All discovered active chats in the project are selected initially. This does not
+reconstruct destination project registries or cloud projects.
 Search matches project names, paths and catalog chat titles. Advanced lets you
 exclude individual chats. Source catalogs are read only.
 
 Each readable conversation becomes a separate native chat using the existing
 version-sensitive adapters. Codex Desktop/CLI and Claude Code CLI persistence use
 the existing engine. Claude Desktop Code copies are initially Claude Code sessions;
-Open performs the existing per-chat desktop handoff. Desktop project grouping is
-not recreated. Claude Chat native creation remains disabled; use the existing
-conversation tool for explicit context handoff.
+the batch then performs each desktop handoff in sequence. A durable handoff marker
+prevents automatic repetition after success or uncertain opening. Open remains an
+explicit recovery action. Desktop project grouping is not recreated. Claude Chat
+is not offered as a native destination; use the conversation tool for explicit
+context handoff. Codex Desktop defaults to Claude Desktop Code.
 
 The default is a new empty folder, stored with the batch under Switchboard's
 Application Support directory. Advanced also offers:
