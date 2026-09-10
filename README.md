@@ -8,6 +8,7 @@ Claude and Codex accounts, within reach. Switchboard is a native macOS menu bar 
 - Select Desktop and CLI identities separately, or share the Codex Desktop login with CLI.
 - See Claude five-hour and weekly usage and Codex weekly usage.
 - Manage saved accounts and API connections from Settings.
+- [Continue a conversation in another app](docs/continue-in-another-app.md) using a reviewed local handoff.
 
 Switchboard is independent of Anthropic and OpenAI.
 

@@ -20,6 +20,7 @@ enum BoardAction {
     case claudeConnection(Bool, Bool)
     case claudeDesktop(String), claudeCLI(String), codexDesktop(String), codexCLI(String)
     case addClaude(Bool), saveClaude, addCodex(Bool), saveCodex, codexMode(Bool)
+    case openContinuationCLI(String, String?)
     case openCLI(String), recoverCodex(Bool), verifyCloud(String), useConnection(String), recoverConnection, addConnection, refresh, preferences, quit
 }
 
@@ -76,6 +77,7 @@ final class SwitchboardModel: ObservableObject {
     @Published var refreshing = false
     @Published var message: String?
     var action: (BoardAction) -> Void = { _ in }
+    var protectPopover: (Bool) -> Void = { _ in }
     var measuredHeight: CGFloat = 600
     var resize: (NSSize) -> Void = { _ in }
 }
@@ -108,9 +110,9 @@ func boardUsageRequests(_ s: AccountStatus) -> [BoardUsageRequest] {
     return requests
 }
 
-func boardTerminalScript(binary: String, provider: String) -> String {
+func boardTerminalScript(binary: String, provider: String, directory: String? = nil) -> String {
     func quote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-    return "#!/bin/bash\n" + quote(binary) + " cli launch " + quote(provider) + "\n"
+    return "#!/bin/bash\nset -e\n" + (directory.map { "cd -- " + quote($0) + "\n" } ?? "") + quote(binary) + " cli launch " + quote(provider) + "\n"
 }
 
 /// Reserve space for the popover arrow and screen edges. Size before showing:
@@ -122,6 +124,7 @@ func boardViewport(visibleFrame: NSRect) -> NSSize {
 
 struct AccountSwitchboard: View {
     @ObservedObject var model: SwitchboardModel
+    @StateObject private var continuation = ContinuationModel()
     @State private var page = "accounts"
     @State private var contentHeight: CGFloat = 600
     @AppStorage("boardWeekly") private var weekly = true
@@ -129,6 +132,20 @@ struct AccountSwitchboard: View {
     private var status: AccountStatus { model.status ?? AccountStatus() }
 
     var body: some View {
+        if page == "continue" {
+            ContinuationView(model: continuation, height: model.viewport.height,
+                close: { page = "accounts" }, openCLI: { model.action(.openContinuationCLI($0, $1)) })
+                .frame(width: model.viewport.width)
+                .onAppear {
+                    continuation.protectPopover = model.protectPopover
+                    let height = min(440, model.viewport.height)
+                    model.measuredHeight = height
+                    model.resize(NSSize(width: model.viewport.width, height: height))
+                }
+        } else { accountBody }
+    }
+
+    private var accountBody: some View {
         ScrollView(.vertical) {
         VStack(spacing: 0) {
             HStack {
@@ -144,6 +161,12 @@ struct AccountSwitchboard: View {
                 provider("claude")
                 Divider()
                 provider("codex")
+                Divider()
+                Button { page = "continue" } label: {
+                    Label("Continue in another app…", systemImage: "arrow.left.arrow.right")
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 12)
+                }.buttonStyle(.plain).foregroundStyle(Color.accentColor)
+                    .disabled(model.busy || SWITCHBOARD_PREVIEW)
             } else if page == "manage" {
                 management
             } else {
@@ -360,6 +383,9 @@ extension AppDelegate {
                 self.sizeSwitchboard(size)
             }
         }
+        board.protectPopover = { [weak self] protected in
+            self?.boardPopover.behavior = protected ? .applicationDefined : .transient
+        }
         boardPopover.behavior = .transient
         boardPopover.animates = false
         let controller = NSHostingController(rootView: AccountSwitchboard(model: board))
@@ -513,6 +539,10 @@ extension AppDelegate {
         case .codexMode(let separate):
             if separate && board.status?.codexCLIActive == nil { performBoardAction(.addCodex(true)); return }
             runAccountOperation(args: ["cli", "mode", separate ? "separate" : "shared"])
+        case .openContinuationCLI(let provider, let directory):
+            guard ["claude", "codex"].contains(provider), let binary = resolveBinary("ai-usagebar") else { return }
+            boardPopover.performClose(nil)
+            runInTerminal(boardTerminalScript(binary: binary, provider: provider, directory: directory))
         case .openCLI(let provider):
             guard let binary = resolveBinary("ai-usagebar") else { return }
             boardPopover.performClose(nil); runInTerminal(boardTerminalScript(binary: binary, provider: provider))
