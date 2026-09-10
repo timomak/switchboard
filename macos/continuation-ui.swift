@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 final class ContinuationModel: ObservableObject {
     enum Page { case choose, review, preparing, ready }
     @Published var page: Page = .choose
-    @Published var source: ContinuationSurface = .claudeChat
+    @Published var source: ContinuationSurface = .codexDesktop
     @Published var query = ""
     @Published var chats: [ContinuationChat] = []
     @Published var selectedID: String?
@@ -23,12 +23,14 @@ final class ContinuationModel: ObservableObject {
     private var generation = UUID()
     private var loaded = false
     private var libraryReadable = true
+    private var imports: [ContinuationChat] = []
+    private var localChats: [String: ContinuationLocalChat] = [:]
     private let simulateExternalActions: Bool
     private(set) var store: ContinuationStore?
 
     init(store: ContinuationStore? = nil, chats: [ContinuationChat] = [], simulateExternalActions: Bool = false) {
         self.simulateExternalActions = simulateExternalActions
-        self.store = store; self.chats = chats; self.loaded = store != nil
+        self.store = store; self.chats = chats; self.imports = chats; self.loaded = store != nil
     }
 
     var filtered: [ContinuationChat] {
@@ -37,13 +39,37 @@ final class ContinuationModel: ObservableObject {
     }
     var selected: ContinuationChat? { filtered.first { $0.id == selectedID } }
 
+    func isAvailable(_ chat: ContinuationChat) -> Bool {
+        if let local = localChats[chat.id], case .unavailable = local.location { return false }
+        return true
+    }
     func load() {
-        guard !loaded else { return }; loaded = true
-        // Do not create or inspect unrelated app histories. Only our own library.
+        guard !loaded else { refresh(); return }; loaded = true
+        // Imported fallbacks are separate from the read-only native catalog.
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let root = support.appendingPathComponent("Switchboard Continuations", isDirectory: true)
         store = ContinuationStore(root: root)
-        do { chats = try store!.load() } catch { libraryReadable = false; message = "Could not read saved imports. Your library was not changed. Use More options → Show local files to recover it." }
+        do { imports = try store!.load(); chats = imports } catch { libraryReadable = false; message = "Could not read saved imports. Your library was not changed. Use More options → Show local files to recover it." }
+        refresh()
+    }
+    func refresh() {
+        guard !simulateExternalActions else { return }
+        cancel(); let token = UUID(); generation = token; busy = true; selectedID = nil; message = nil
+        localChats = [:]; chats = imports
+        let surface = source
+        work = Task { [weak self] in
+            let worker = Task.detached(priority: .userInitiated) { try ContinuationDiscovery.catalog(surface: surface) }
+            do {
+                let entries = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+                guard let self, self.generation == token, !Task.isCancelled else { return }
+                self.localChats = Dictionary(entries.map { ($0.chat.id, $0) }, uniquingKeysWith: { first, _ in first })
+                self.chats = self.imports + entries.map(\.chat)
+            } catch {
+                guard let self, self.generation == token, !Task.isCancelled else { return }
+                self.message = "Could not read local chats. Try refreshing."
+            }
+            guard let self, self.generation == token else { return }; self.busy = false
+        }
     }
     func chooseFiles() {
         protectPopover(true); defer { protectPopover(false) }
@@ -82,10 +108,10 @@ final class ContinuationModel: ObservableObject {
     }
     func add(_ values: [ContinuationChat]) throws {
         guard libraryReadable, let store else { throw ContinuationError.storage }
-        var merged = Dictionary(chats.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var merged = Dictionary(imports.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         for chat in values { merged[chat.id] = chat }
         let result = Array(merged.values)
-        try store.save(result); chats = result; selectedID = values.first?.id
+        try store.save(result); imports = result; chats = imports + localChats.values.map(\.chat); selectedID = values.first?.id
     }
     func importPaste() {
         do {
@@ -96,11 +122,28 @@ final class ContinuationModel: ObservableObject {
     }
     func forgetSelected() {
         guard let id = selected?.id, let store else { return }
-        do { let remaining = chats.filter { $0.id != id }; try store.save(remaining); chats = remaining; selectedID = nil }
+        do { let remaining = imports.filter { $0.id != id }; try store.save(remaining); imports = remaining; chats = imports + localChats.values.map(\.chat); selectedID = nil }
         catch { message = "Could not remove this import. Try again." }
     }
     func review() {
         guard let selected else { return }
+        if let entry = localChats[selected.id] {
+            let token = UUID(); generation = token; busy = true; message = nil
+            work = Task { [weak self] in
+                let worker = Task.detached(priority: .userInitiated) { try ContinuationDiscovery.read(entry) }
+                do {
+                    let chat = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+                    guard let self, self.generation == token, !Task.isCancelled else { return }
+                    self.beginReview(chat)
+                } catch {
+                    guard let self, self.generation == token, !Task.isCancelled else { return }
+                    self.message = "Could not read this conversation. It may be unavailable locally, changing, or too large."
+                }
+                guard let self, self.generation == token else { return }; self.busy = false
+            }
+        } else { beginReview(selected) }
+    }
+    private func beginReview(_ selected: ContinuationChat) {
         draft = ContinuationDraft(chat: selected, destination: selected.surface == .claudeChat || selected.surface == .claudeCode ? .codexDesktop : .claudeChat)
         draft?.omissionsReviewed = !(selected.omissions.contains { $0.contains("attachments") || $0.contains("Unsupported") })
         message = nil; copied = false; page = .review
@@ -190,6 +233,7 @@ struct ContinuationView: View {
     @State private var advanced = false
     @State private var more = false
     @State private var showSummary = false
+    @State private var visibleCount = 100
 
     var body: some View {
         VStack(spacing: 0) {
@@ -247,34 +291,43 @@ struct ContinuationView: View {
             Text("Choose a conversation").font(.title3).fontWeight(.semibold)
             Picker("From", selection: $model.source) {
                 ForEach(ContinuationSurface.allCases) { Text($0.title).tag($0) }
-            }.onChange(of: model.source) { _, _ in model.selectedID = nil; model.query = "" }
+            }.onChange(of: model.source) { _, _ in model.selectedID = nil; model.query = ""; model.refresh() }
                 .disabled(model.busy)
             TextField("Search chats…", text: $model.query).textFieldStyle(.roundedBorder).accessibilityLabel("Search chats")
-            if model.filtered.isEmpty {
-                Text(model.chats.contains(where: { $0.surface == model.source }) ? "No chats found." : "No imported chats.").foregroundStyle(.secondary)
+            if model.busy { ProgressView().controlSize(.small) }
+            else if model.filtered.isEmpty {
+                Text(model.source == .claudeChat && model.query.isEmpty ? "Claude Chat isn’t available locally. Use More options." : "No chats found.").foregroundStyle(.secondary)
             }
-            ForEach(model.filtered) { chat in
+            ForEach(Array(model.filtered.prefix(visibleCount))) { chat in
                 Button { model.selectedID = chat.id } label: {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(chat.title).fontWeight(.medium).lineLimit(1)
-                            Text("\(chat.messages.count) messages").font(.caption).foregroundStyle(.secondary)
+                            if model.isAvailable(chat) {
+                                Text(chat.importedAt, style: .date).font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                Text("Not stored locally").font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                         Spacer()
                         if model.selectedID == chat.id { Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.accentColor) }
                     }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
                         .background(model.selectedID == chat.id ? Color.accentColor.opacity(0.1) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 7))
-                }.buttonStyle(.plain).disabled(model.busy)
+                }.buttonStyle(.plain).disabled(model.busy || !model.isAvailable(chat))
+            }
+            if model.filtered.count > visibleCount {
+                Button("Show more") { visibleCount += 100 }
             }
             DisclosureGroup("More options", isExpanded: $more) {
                 VStack(alignment: .leading, spacing: 10) {
+                    Button("Refresh chats") { model.refresh() }
                     HStack {
                         Button("Choose export…") { model.chooseFiles() }
                         Button("Paste text…") { model.showPaste = true }
                     }
                     Text(model.source == .claudeChat ? "Claude: Settings → Privacy → Export data. Choose conversations.json from the downloaded export." : "Choose local session JSONL or an exported text file.")
                         .font(.caption).foregroundStyle(.secondary)
-                    if model.selected != nil { Button("Remove imported copy") { model.forgetSelected() } }
+                    if let selected = model.selected, !selected.id.hasPrefix("local:") { Button("Remove imported copy") { model.forgetSelected() } }
                     Button("Show local files…") {
                         if let root = model.store?.root { NSWorkspace.shared.activateFileViewerSelecting([root]) }
                     }

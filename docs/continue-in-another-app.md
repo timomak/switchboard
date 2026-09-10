@@ -2,7 +2,7 @@
 
 Switchboard can prepare a portable conversation for Claude Desktop Chat,
 Claude Code CLI, Codex Desktop, or Codex CLI. Open **Continue in another app…**
-from the account popover, search a previously imported chat, choose an app,
+from the account popover, search an existing local chat, choose an app,
 and select **Prepare**. **Copy context** copies the prepared text;
 **Open** launches the destination using its existing sign-in. Paste the context
 into a new conversation. Add files from **Details → Show files** when needed.
@@ -16,22 +16,27 @@ creation/deep-link interface is assumed.
 
 ## Sources and search
 
-Search covers titles in Switchboard's imported library, not an unapproved scan of
-other apps. Under **More options**, choose one or more files or paste text:
+Search reads the selected source directly. The list stays in memory and the selected
+transcript is loaded when you choose **Next**. **More options → Refresh chats**
+reloads the catalog. Existing sign-ins are unchanged.
 
-| Source | Accepted input |
+| Source | Direct discovery |
 | --- | --- |
-| Claude Desktop Chat | Extracted `conversations.json` account export (`chat_messages`, human/assistant); TXT/Markdown or pasted text |
-| Claude Code CLI | Selected primary-session JSONL; `/export` TXT; Markdown or pasted text |
-| Codex Desktop / CLI | Selected legacy rollout JSONL `response_item` messages; TXT/Markdown or pasted text |
+| Codex Desktop | Local `state_*.sqlite` catalog; legacy rollout JSONL and paginated `thread_history_1.sqlite` transcripts |
+| Codex CLI | CLI-origin sessions in the same catalog; session files when no catalog exists |
+| Claude Code CLI | Primary JSONL sessions under `~/.claude/projects`; subagent folders and sidechains excluded |
+| Claude Desktop Chat | Cloud chats are not available through local discovery; export/paste remains a fallback |
 
-For Claude Chat, obtain an export in Settings → Privacy. Extract the archive yourself
-and choose the conversation JSON file. Switchboard never reads cookies, credentials,
-private SQLite databases or arbitrary account directories. ZIPs and new paginated
-Codex storage formats are not supported. Missing/unknown schemas and partial JSONL
-fail rather than being guessed. Import is all-or-nothing per selected batch. Repeated
-imports of the same source surface and message content replace the imported copy
-without duplicating it. Different snapshots remain distinct.
+`CODEX_HOME` and `CLAUDE_CONFIG_DIR` override the default roots when present in
+Switchboard's environment. Launching a GUI from Finder does not inherit terminal-only
+environment variables. Codex records whose transcript files are gone remain visible
+as **Not stored locally**, with selection disabled. Unknown database schemas produce
+a recovery message. Catalogs are opened read-only; credentials and cookies are not read.
+
+Exports and pasted text remain under **More options**. Claude `conversations.json`,
+primary-session JSONL, TXT and Markdown are supported. ZIPs are not. Malformed or
+changing session files fail rather than yielding silently truncated context. Import
+batches are all-or-nothing; native catalogs are never saved into the imported library.
 
 Claude Code and current Codex also have a vendor-native import route. This feature
 does not wrap that experimental protocol: use Codex Settings → Import or CLI
@@ -76,7 +81,7 @@ historical reference and never executes any of their contents.
 ## Verification
 
 `./macos/run-tests.sh` runs the existing menu/account harness and isolated continuation
-checks. The latter use synthetic JSON, text and temporary files only. They cover
+checks. The latter use synthetic JSON, SQLite databases, text and temporary files only. They cover
 ordering, duplicate identity, malformed input, Codex event/response duplication,
 missing attachments, bounded reads, symlinks, permissions, source preservation,
 receipt identity, changed-file detection, range disclosure, cancellation and cleanup.
@@ -85,6 +90,6 @@ installation, account switching or live chat transfer is part of these checks.
 
 A fixture-only native UI harness can be built with `-D SWIFT_TEST_HARNESS
 -D CONTINUATION_PREVIEW`, compiling the app, account-switchboard, continuation-core,
-continuation-ui and continuation-preview Swift files. Pass an isolated output directory.
+continuation-discovery, continuation-ui and continuation-preview Swift files. Pass an isolated output directory.
 It suppresses clipboard writes and destination launches. Do not run the normal app
 entry point for fixture verification.

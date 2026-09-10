@@ -2,8 +2,8 @@ import Foundation
 import CryptoKit
 import Darwin
 
-// No provider APIs, credentials or native history writes. The portable library
-// contains only conversations explicitly selected by the user.
+// No provider APIs, credentials or native history writes. Native catalogs are
+// read-only; the portable library contains explicitly imported fallbacks.
 enum ContinuationSurface: String, Codable, CaseIterable, Identifiable {
     case claudeChat, claudeCode, codexDesktop, codexCLI
     var id: String { rawValue }

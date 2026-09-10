@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 @main
 struct ContinuationTests {
@@ -98,7 +99,74 @@ struct ContinuationTests {
         do { _ = try await operation.value; fatalError("cancelled preparation succeeded") }
         catch { checks += 1; print("  ✓ cancelled preparation does not commit") }
         check(!FileManager.default.fileExists(atPath: store.root.appendingPathComponent(cancelledID.uuidString).path), "cancelled staging removed")
+        try discoveryTests(root)
         print("\n\(checks) continuation checks passed")
+    }
+    static func discoveryTests(_ root: URL) throws {
+        let home = root.appendingPathComponent("native-home")
+        let codex = home.appendingPathComponent(".codex")
+        let claude = home.appendingPathComponent(".claude/projects/demo")
+        try FileManager.default.createDirectory(at: codex, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: claude, withIntermediateDirectories: true)
+        func database(_ path: URL, _ sql: String) throws {
+            var db: OpaquePointer?
+            guard sqlite3_open(path.path, &db) == SQLITE_OK else { throw ContinuationError.storage }
+            defer { sqlite3_close(db) }
+            guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw ContinuationError.invalid }
+        }
+        let state = codex.appendingPathComponent("state_5.sqlite")
+        try database(state, """
+        CREATE TABLE threads (id TEXT, title TEXT, name TEXT, updated_at INTEGER, rollout_path TEXT, source TEXT, history_mode TEXT);
+        INSERT INTO threads VALUES ('desktop', 'Old title', 'Renamed chat', 100, '/missing', 'vscode', 'paginated');
+        INSERT INTO threads VALUES ('cli', 'CLI chat', NULL, 90, '/missing', 'cli', 'legacy');
+        INSERT INTO threads VALUES ('agent', 'Hidden agent', NULL, 80, '/missing', '{"subagent":{}}', 'legacy');
+        """)
+        let history = codex.appendingPathComponent("thread_history_1.sqlite")
+        try database(history, """
+        CREATE TABLE thread_items (thread_id TEXT, item_id TEXT, rollout_ordinal INTEGER, created_at_ms INTEGER, item_type TEXT, item_json TEXT);
+        INSERT INTO thread_items VALUES ('desktop', 'a', 2, 2000, 'agentMessage', '{"type":"agentMessage","text":"Answer"}');
+        INSERT INTO thread_items VALUES ('desktop', 'u', 1, 1000, 'userMessage', '{"type":"userMessage","content":[{"type":"text","text":"Question"},{"type":"image"}]}');
+        INSERT INTO thread_items VALUES ('desktop', 'r', 3, 3000, 'reasoning', '{"type":"reasoning","text":"Private reasoning"}');
+        INSERT INTO thread_items VALUES ('other', 'x', 4, 4000, 'agentMessage', '{"type":"agentMessage","text":"Other thread"}');
+        """)
+        let rollout = codex.appendingPathComponent("legacy.jsonl")
+        try Data("""
+        {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Legacy question"}]}}
+        """.utf8).write(to: rollout)
+        try database(state, "INSERT INTO threads VALUES ('legacy', 'Legacy session', NULL, 70, 'legacy.jsonl', 'cli', 'legacy');")
+        let before = try Data(contentsOf: state)
+        let entries = try ContinuationDiscovery.catalog(surface: .codexDesktop, home: home, environment: [:])
+        check(entries.count == 1 && entries[0].chat.title == "Renamed chat", "native Codex catalog uses title and excludes CLI/subagents")
+        check(entries[0].chat.messages.isEmpty, "discovery does not eagerly load transcripts")
+        let chat = try ContinuationDiscovery.read(entries[0])
+        check(chat.messages.map(\.text) == ["Question", "Answer"], "paginated transcript stays ordered and thread-scoped")
+        check(chat.omissions.contains { $0.contains("attachments") }, "native attachments require explicit review")
+        check(chat.id == entries[0].chat.id, "native selection identity survives transcript loading")
+        check(tryValue { try Data(contentsOf: state) } == before, "native catalog remains unchanged")
+        let cli = try ContinuationDiscovery.catalog(surface: .codexCLI, home: home, environment: [:])
+        check(cli.count == 2 && cli[0].chat.title == "CLI chat", "CLI source lists CLI sessions")
+        rejects("missing local transcript fails explicitly") { _ = try ContinuationDiscovery.read(cli[0]) }
+        check(tryValue { try ContinuationDiscovery.read(cli[1]).messages.first?.text } == "Legacy question", "legacy Codex session loads from catalog path")
+        let injection = ContinuationLocalChat(chat: entries[0].chat, location: .history(history, "desktop' OR 1=1 --"))
+        rejects("thread IDs are bound SQL parameters") { _ = try ContinuationDiscovery.read(injection) }
+        let session = claude.appendingPathComponent("session.jsonl")
+        let data = Data("""
+        {"type":"user","message":{"content":"Real local chat"}}
+        {"type":"assistant","message":{"content":[{"type":"text","text":"Response"}]}}
+        """.utf8)
+        try data.write(to: session)
+        let subagents = claude.appendingPathComponent("subagents")
+        try FileManager.default.createDirectory(at: subagents, withIntermediateDirectories: false)
+        try data.write(to: subagents.appendingPathComponent("agent.jsonl"))
+        try FileManager.default.createSymbolicLink(at: claude.appendingPathComponent("link.jsonl"), withDestinationURL: session)
+        let local = try ContinuationDiscovery.catalog(surface: .claudeCode, home: home, environment: [:])
+        check(local.count == 1 && local[0].chat.title == "Real local chat", "Claude discovery excludes subagents and symlinks")
+        check(tryValue { try ContinuationDiscovery.read(local[0]).messages.count } == 2, "Claude sessions load without importing")
+        check(tryValue { try Data(contentsOf: session) } == data, "Claude source file stays unchanged")
+        let configured = try ContinuationDiscovery.catalog(surface: .claudeCode, home: root, environment: ["CLAUDE_CONFIG_DIR": home.appendingPathComponent(".claude").path])
+        check(configured.count == 1, "custom Claude config directory is honored")
+        check(tryValue { try ContinuationDiscovery.catalog(surface: .codexDesktop, home: root, environment: ["CODEX_HOME": codex.path]).count } == 1, "custom Codex home is honored")
+        check(tryValue { try ContinuationDiscovery.catalog(surface: .claudeChat, home: home, environment: [:]).isEmpty } == true, "cloud Claude Chat is not mislabeled as local Code history")
     }
     static func tryValue<T>(_ body: () throws -> T) -> T? { try? body() }
 }
