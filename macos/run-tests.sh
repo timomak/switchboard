@@ -15,8 +15,16 @@ trap 'rm -rf "$TMP"' EXIT
 
 echo "› Compiling + running tests…"
 swiftc -O -parse-as-library -D SWIFT_TEST_HARNESS \
-  "$DIR/ai-usagebar-menubar.swift" "$DIR/account-switchboard.swift" \
+  "$DIR/ai-usagebar-menubar.swift" "$DIR/account-switchboard.swift" "$DIR/continuation-core.swift" "$DIR/continuation-native.swift" "$DIR/continuation-discovery.swift" "$DIR/continuation-ui.swift" "$DIR/continuation-claude.swift" \
   "$DIR/ai-usagebar-tests.swift" \
   -o "$TMP/ai-usagebar-tests"
 
 "$TMP/ai-usagebar-tests"
+
+swiftc -O -parse-as-library "$DIR/continuation-core.swift" "$DIR/continuation-native.swift" "$DIR/continuation-discovery.swift" \
+  "$DIR/continuation-tests.swift" -o "$TMP/continuation-tests"
+"$TMP/continuation-tests"
+
+swiftc -O -parse-as-library "$DIR/continuation-core.swift" "$DIR/continuation-native.swift" "$DIR/continuation-discovery.swift" \
+  "$DIR/continuation-native-tests.swift" -o "$TMP/continuation-native-tests"
+"$TMP/continuation-native-tests"

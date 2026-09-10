@@ -811,4 +811,8 @@ func testSwitchboardRequests() {
     assertEqual(boardUsageRequests(shared).count, 3, "shared Codex does not duplicate credential refresh")
     let script = boardTerminalScript(binary: "/Applications/AI Usage Bar.app/bin/ai-usagebar", provider: "codex")
     assertEqual(script.contains("' cli launch 'codex'"), true, "launcher calls the official CLI through the backend")
+    let continuationScript = boardTerminalScript(binary: "/fixture/bin", provider: "claude", directory: "/fixture/a'b $(touch never)")
+    assertEqual(continuationScript.contains("cd -- '/fixture/a'\\''b $(touch never)'"), true, "continuation directory is shell quoted")
+    assertEqual(continuationScript.contains("set -e"), true, "failed directory selection cannot launch in another project")
+
 }
