@@ -66,7 +66,7 @@ local Codex chats. Keep this store out of Git and public backups.
 
 ## CLI
 
-Use the backend from this fork, not the crates.io build:
+Use the backend bundled with Switchboard:
 
 ```bash
 ./target/release/ai-usagebar codex-account status --json
@@ -78,21 +78,14 @@ Use the backend from this fork, not the crates.io build:
 ./target/release/ai-usagebar codex-account remove work # only when inactive
 ```
 
-## Codebase analysis and port boundary
+## Architecture
 
-| Concern | ai-usagebar base | Codex Account Switcher source | This fork |
-|---|---|---|---|
-| Menu and usage display | Swift/AppKit menu, Rust provider core | Separate Swift menu app | Keep ai-usagebar's UI and usage core |
-| Claude login switching | Rust Claude Desktop profile capture/merge | None | Retain existing workflow |
-| Codex credential store | Reads current Codex auth for usage | `AccountStore.swift` | Independent private profile store; preserve complete auth JSON |
-| Add Codex account | None | `CodexClient.swift` isolated app-server login | Port official login RPC and completion notification |
-| Desktop lifecycle | Claude lifecycle | `DesktopController.swift` | Graceful Codex quit and reopen |
-| Account transaction | Claude-specific switch | `SwitchService.swift` | Validate, save outgoing tokens, activate, verify and roll back; add interrupted-switch recovery |
-| Other switcher features | Existing usage charts/providers | Charts, updater and other account dashboard features | No additional port |
-
-Rust owns credentials and process orchestration. Swift consumes non-secret
-status JSON and dispatches commands; it never opens a credential file. Source
-commits and MIT attribution are recorded in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+Rust owns credentials, isolated login, process orchestration, and recoverable
+account transactions. Swift consumes non-secret status JSON and dispatches
+commands; it never opens a credential file. Switching validates the profile,
+saves outgoing tokens, activates the selected account, verifies it, and rolls
+back on failure. Required attributions are in
+[third-party notices](../THIRD_PARTY_NOTICES.md).
 
 ## Validation
 

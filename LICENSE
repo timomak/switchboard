@@ -1,21 +1,35 @@
-MIT License
+Switchboard Permissive License 1.0
 
-Copyright (c) 2026 AkitaOnRails
+Copyright (c) 2026 Timofey Makhlay
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Scope
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+This license applies to original Switchboard contributions owned by the
+copyright holder above. It does not replace the licenses of incorporated
+third-party code, assets, or dependencies. Their notices and terms remain
+applicable; see THIRD_PARTY_NOTICES.md and any component-specific notices.
+Rights already granted for earlier versions are not revoked by this license.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Permission
+
+You may use, copy, modify, combine, publish, distribute, sublicense, and sell
+covered contributions, in source or compiled form, for any purpose, including
+commercial purposes, without a fee or a requirement to disclose source code.
+
+Conditions
+
+When distributing covered contributions or a substantial portion of them,
+include this license and its copyright notice. Retain all applicable
+third-party license and copyright notices with incorporated material.
+
+This license grants no rights to trademarks, product names, or logos, and
+provides no permission to imply endorsement by a contributor.
+
+Disclaimer
+
+Covered contributions are supplied as available, without warranties, express
+or implied, including warranties of merchantability, fitness for a particular
+purpose, title, or non-infringement. To the extent permitted by applicable
+law, no author or copyright holder is liable for claims, damages, or other
+liability arising from the contributions or their use, whether in contract,
+tort, or otherwise.

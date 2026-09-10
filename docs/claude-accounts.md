@@ -236,10 +236,9 @@ reported as a conflict. Edit the preferred copy again to resolve it on the next
 switch.
 
 Account removal and chat filters (`only` / `reset`) are not implemented. Remove
-a profile directory manually or use claude-acc. Cowork sessions stay with the
+a profile directory manually. Cowork sessions stay with the
 account that created them because their transcript path contains the account
 UUID.
 
-The Desktop profile format and switching behavior are based on
-[claude-acc](https://github.com/ohmaseclaro/claude-acc) (MIT). The Desktop
-versions of `add` and `switch` share its profile store.
+Profile-format compatibility attribution is recorded in
+[third-party notices](../THIRD_PARTY_NOTICES.md).
