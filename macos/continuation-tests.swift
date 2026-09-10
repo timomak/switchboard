@@ -64,7 +64,15 @@ struct ContinuationTests {
         rejects("size checked before unbounded read") { _ = try ContinuationFiles.read(source, limit: 1) }
         let selection = try ContinuationAttachment.select(source)
         var draft = ContinuationDraft(chat: chats[0], destination: .codexDesktop)
-        rejects("attachment omission requires explicit decision") { try draft.validate() }
+        check(draft.omissionsReviewed && tryValue { try draft.validate(); return true } == true, "omitted content is allowed by default")
+        draft.omissionsReviewed = false
+        rejects("opting out blocks a handoff with omissions") { try draft.validate() }
+        let prompt = "Code & Unicode é 🐈 + ? # \n next"
+        let linkURL = try ContinuationClaudeLink.make(prompt: prompt)
+        let parts = URLComponents(url: linkURL, resolvingAgainstBaseURL: false)!
+        check(parts.scheme == "claude" && parts.host == "claude.ai" && parts.path == "/new", "Claude opens the documented new-chat route")
+        check(parts.queryItems?.first?.value == prompt, "Claude prompt encoding preserves all text")
+        rejects("long Claude prompts cannot be silently truncated") { _ = try ContinuationClaudeLink.make(prompt: String(repeating: "x", count: 12001)) }
         draft.omissionsReviewed = true; draft.files = [selection]; draft.summary = "Reviewed summary"
         let before = try Data(contentsOf: source)
         let bundle = try store.prepare(draft, id: UUID())
@@ -79,7 +87,7 @@ struct ContinuationTests {
         let failedID = UUID()
         rejects("changed selected file blocks preparation") { _ = try store.prepare(draft, id: failedID) }
         check(!FileManager.default.fileExists(atPath: store.root.appendingPathComponent(failedID.uuidString).path), "failed staging removed")
-        draft.files = []; draft.nextStep = String(repeating: "x", count: ContinuationLimits.inlineContext)
+        draft.files = []; draft.contextOnly = true; draft.nextStep = String(repeating: "x", count: ContinuationLimits.inlineContext)
         rejects("oversized context is not silently truncated") { _ = try store.prepare(draft, id: UUID()) }
         draft.nextStep = "Continue"; draft.firstMessage = 1
         check(draft.omissions.contains("1 earlier messages excluded."), "message range exclusion disclosed")
@@ -140,7 +148,7 @@ struct ContinuationTests {
         check(entries[0].chat.messages.isEmpty, "discovery does not eagerly load transcripts")
         let chat = try ContinuationDiscovery.read(entries[0])
         check(chat.messages.map(\.text) == ["Question", "Answer"], "paginated transcript stays ordered and thread-scoped")
-        check(chat.omissions.contains { $0.contains("attachments") }, "native attachments require explicit review")
+        check(chat.omissions.contains { $0.contains("attachments") }, "native attachments remain disclosed")
         check(chat.id == entries[0].chat.id, "native selection identity survives transcript loading")
         check(tryValue { try Data(contentsOf: state) } == before, "native catalog remains unchanged")
         let cli = try ContinuationDiscovery.catalog(surface: .codexCLI, home: home, environment: [:])

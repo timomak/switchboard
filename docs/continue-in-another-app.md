@@ -1,95 +1,103 @@
 # Continue in another app
 
-Switchboard can prepare a portable conversation for Claude Desktop Chat,
-Claude Code CLI, Codex Desktop, or Codex CLI. Open **Continue in another app…**
-from the account popover, search an existing local chat, choose an app,
-and select **Prepare**. **Copy context** copies the prepared text;
-**Open** launches the destination using its existing sign-in. Paste the context
-into a new conversation. Add files from **Details → Show files** when needed.
-For a CLI, select a project folder under Advanced before opening it.
+The two-step UI searches existing local chats and creates an independent destination
+conversation with separate historical user/assistant messages. Continue creates the
+session, verifies the stored text and roles, then opens its exact ID. It uses the
+existing destination sign-in. No model request is submitted while cloning.
 
-This creates a new-conversation handoff. It does not create native history entries,
-submit prompts, auto-paste, move running work, switch accounts, or call model APIs.
-The ready state means files are prepared locally. The destination remains responsible
-for sign-in, submission, permissions and model behavior. No public native-thread
-creation/deep-link interface is assumed.
+## Destinations
 
-## Sources and search
-
-Search reads the selected source directly. The list stays in memory and the selected
-transcript is loaded when you choose **Next**. **More options → Refresh chats**
-reloads the catalog. Existing sign-ins are unchanged.
-
-| Source | Direct discovery |
+| Destination | Build 23 behavior |
 | --- | --- |
-| Codex Desktop | Local `state_*.sqlite` catalog; legacy rollout JSONL and paginated `thread_history_1.sqlite` transcripts |
-| Codex CLI | CLI-origin sessions in the same catalog; session files when no catalog exists |
-| Claude Code CLI | Primary JSONL sessions under `~/.claude/projects`; subagent folders and sidechains excluded |
-| Claude Desktop Chat | Cloud chats are not available through local discovery; export/paste remains a fallback |
+| Codex Desktop | Convert selected messages into a temporary rollout; Codex app-server forks it into its own native store, names it, and reads it back. Open `codex://threads/<id>`. |
+| Codex CLI | Same native creation in the shared or separately configured CLI store; launch `codex resume <id>`. |
+| Claude Code CLI | Atomically publish a new linked JSONL session with original roles/text and a new session ID; launch `claude --resume <id>`. |
+| Claude Desktop · Code | Create the Claude Code session, then run `claude --resume <id> /desktop` in a private pseudo-terminal for Claude's desktop handoff. This route requires the official CLI and an eligible signed-in Claude subscription. The user confirmed this handoff works in build 22; build 23 removes the visible Terminal launcher. |
+| Claude Desktop · Chat | Native history import is unavailable. Continue is disabled unless the user explicitly enables context handoff under Advanced. Never silently switch to Code or label a prepared prompt as a clone. |
 
-`CODEX_HOME` and `CLAUDE_CONFIG_DIR` override the default roots when present in
-Switchboard's environment. Launching a GUI from Finder does not inherit terminal-only
-environment variables. Codex records whose transcript files are gone remain visible
-as **Not stored locally**, with selection disabled. Unknown database schemas produce
-a recovery message. Catalogs are opened read-only; credentials and cookies are not read.
+Codex's path-based fork is an experimental, version-sensitive protocol adapter,
+verified with Codex CLI 0.151.0. It does not call the cloud-only resume-history API,
+write SQLite indexes, import account configuration, or inherit running goals. The
+Claude transcript writer is a compatibility adapter, not a vendor-supported import
+API. Its output was independently read with the official Claude Agent SDK 0.3.267;
+the installed CLI is 2.1.250. Runtime read-back rejects missing or changed messages.
 
-Exports and pasted text remain under **More options**. Claude `conversations.json`,
-primary-session JSONL, TXT and Markdown are supported. ZIPs are not. Malformed or
-changing session files fail rather than yielding silently truncated context. Import
-batches are all-or-nothing; native catalogs are never saved into the imported library.
+The source snapshot is converted, including Codex-to-Codex routes: this build clones
+visible conversation history, not tool execution state. The original remains unchanged.
+A destination receipt is saved before verification. Retry rechecks the same session;
+an uncertain fork without a returned ID blocks automatic duplication. A new deliberate
+clone request gets a new identity. Once published, session files belong to the destination.
 
-Claude Code and current Codex also have a vendor-native import route. This feature
-does not wrap that experimental protocol: use Codex Settings → Import or CLI
-`/import` directly when appropriate. See the [official import guide](https://learn.chatgpt.com/docs/import).
+## Search and minimal controls
 
-## What transfers
+| Source | Discovery |
+| --- | --- |
+| Codex Desktop | Read-only local `state_*.sqlite` catalog; legacy JSONL and paginated `thread_history_1.sqlite` content |
+| Codex CLI | CLI-origin sessions, including Switchboard CLI clones, in the selected shared/separate CLI store |
+| Claude Code CLI | Primary JSONL histories under the configured Claude projects directory; subagents excluded |
+| Claude Desktop · Chat | Cloud history is not exposed through local discovery. Export/paste stays under More options. |
 
-Messages, code text, available timestamps, an optional user-written summary,
-a next step, and explicitly chosen files. Source paths are not followed from a
-transcript; referenced attachments require the user to add their originals.
-Unsupported blocks, missing attachment content, tool activity and excluded earlier
-messages are disclosed. Attachments/unsupported blocks require an explicit decision
-before preparing. General metadata/tool omissions stay under Advanced.
-The manifest and context both describe omissions. No hidden reasoning, credentials,
-source tool permissions, native IDs or running process state is restored.
+The source's existing working directory is selected when available. Otherwise an
+isolated workspace is created beside the clone's local receipt. Choose a different
+project folder under Advanced. Filesystem contents and uncommitted changes are not
+cloned with a conversation. Remote/cloud-only sessions remain outside local support.
 
-**Advanced** contains summary, next step, project folder, starting message, selected
-files and the complete context preview. An overly large context blocks Prepare.
-The user can select a later starting message; nothing is silently truncated.
+Export/paste remains under More options. Omissions, project folder, message range,
+summary, next step, selected files, transcript preview, and context-only handoff are
+under Advanced. Omissions are allowed by default. Copy context stays under Advanced
+on the result page. There is no destination-account picker.
 
-## Storage and privacy
+Claude JSON exports, JSONL, TXT and Markdown can supply fallback sources. Plain text
+without independently parsed roles remains a single historical message, not a claim
+of reconstructed turns. Native catalogs are never copied into the imported library.
 
-Library and bundles live in `~/Library/Application Support/Switchboard Continuations/`.
-They are private local files (directory mode 0700, file mode 0600), not encrypted.
-No conversation telemetry or provider upload occurs. **Remove imported copy** removes
-that library entry; it does not change the original export. **Show local files…**
-opens the library location so stored bundles can be managed. **Delete prepared files**
-removes the current bundle. Successfully prepared bundles persist until explicitly
-removed, so a destination's file reference is not broken by an expiry timer.
-Cancellation or failed preparation removes the staging directory. Cancellation
-never kills source work or claims to undo a submitted destination message.
+## Fidelity and local storage
 
-Limits: 100 MB total selected input/library, 200 stored chats, 10,000 messages and
-5 MB of text per chat; 48,000 UTF-8 bytes of prepared context; 10 selected files and
-20 MB total context/file bytes. These are Switchboard limits, not provider context
-or upload guarantees. Binary file acceptance must still be checked by the destination.
-Files are regular-file-only, bounded reads with no final-component symlinks; changed
-files fail preparation. Generated output names cannot traverse paths or overwrite
-receipts. Source messages can contain instructions; the wrapper treats them as
-historical reference and never executes any of their contents.
+User/assistant text and ordering are preserved. Timestamps and title are retained
+where supported. Unsupported content, reasoning, tool execution, system/developer
+instructions, and unresolved attachment bytes are disclosed as omissions. Original
+model internals, permissions, credentials, jobs, and context-window state do not transfer.
+Opening a session does not automatically resubmit its last user message.
+
+Selected files are copied into private local storage. A supplemental history message
+references those copies; they are not automatically uploaded as native multimodal
+attachments. Explicit summary/next-step text becomes a supplemental user message. The
+default next-step placeholder adds nothing to the cloned history.
+
+Library, source snapshots and receipts live under
+`~/Library/Application Support/Switchboard Continuations/`, with private file modes.
+Native sessions live in the destination's existing session store. Completed clone
+receipts and attachments remain available; deleting them can break file references,
+so the clone result does not offer the old Delete prepared files action.
+
+Limits: 100 MB source input; 10,000 messages and 5 MB transcript text; 10 selected
+files and 20 MB combined bundle. The 48 KB inline-context limit applies only to
+explicit context handoff, not native cloning. Claude project keys over 200 encoded
+characters require choosing a shorter workspace path. No silent truncation occurs.
+
+`CODEX_HOME` and `CLAUDE_CONFIG_DIR` are honored when supplied to the app; GUI launches
+do not inherit terminal-only variables. The separate Codex CLI store is selected from
+Switchboard's existing CLI mode. No credentials are copied by the cloning engine.
 
 ## Verification
 
-`./macos/run-tests.sh` runs the existing menu/account harness and isolated continuation
-checks. The latter use synthetic JSON, SQLite databases, text and temporary files only. They cover
-ordering, duplicate identity, malformed input, Codex event/response duplication,
-missing attachments, bounded reads, symlinks, permissions, source preservation,
-receipt identity, changed-file detection, range disclosure, cancellation and cleanup.
-`./macos/build.sh` and `./macos/bundle.sh` compile/package the native app. No app
-installation, account switching or live chat transfer is part of these checks.
+`./macos/run-tests.sh` runs the existing menu/account checks, continuation checks,
+and a native clone harness. The native harness uses synthetic text and isolated
+stores, never a live chat or model turn. When Codex is installed it exercises actual
+app-server persistence, restart/read-back, title, exact text/roles, completed history,
+and receipt-based retry. Without Codex it explicitly reports the integration skip.
 
-A fixture-only native UI harness can be built with `-D SWIFT_TEST_HARNESS
--D CONTINUATION_PREVIEW`, compiling the app, account-switchboard, continuation-core,
-continuation-discovery, continuation-ui and continuation-preview Swift files. Pass an isolated output directory.
-It suppresses clipboard writes and destination launches. Do not run the normal app
-entry point for fixture verification.
+The build's independent Claude SDK check verifies discovery and all 40 fixture
+messages, including Unicode paths and text. It calls only session readers, never
+an agent query. The user confirmed the signed-in `/desktop` handoff in build 22. Build 23 tests
+the hidden PTY transport with synthetic commands: real terminal descriptors, large
+output, exit status, timeout/child cleanup, cancellation, and script cleanup. It
+does not repeat live chat transfers. CLI destinations still open Terminal normally.
+If Claude requires interaction, an explicit Open in Terminal action under Advanced
+opens the same saved clone for recovery. No Terminal window is opened automatically
+on error and no existing terminal is closed.
+
+Sources: [Codex deep links](https://learn.chatgpt.com/docs/app/commands),
+[Codex app server](https://learn.chatgpt.com/docs/app-server),
+[Claude desktop handoff](https://code.claude.com/docs/en/desktop),
+[Claude session readers](https://code.claude.com/docs/en/agent-sdk/python).

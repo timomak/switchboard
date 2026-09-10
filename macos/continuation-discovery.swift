@@ -7,6 +7,7 @@ struct ContinuationLocalChat {
     enum Location { case session(URL), history(URL, String), unavailable }
     var chat: ContinuationChat
     var location: Location
+    var workspace: URL? = nil
 }
 
 private final class ContinuationDatabase {
@@ -57,7 +58,7 @@ enum ContinuationDiscovery {
         case .claudeCode:
             let root = environment["CLAUDE_CONFIG_DIR"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) } ?? home.appendingPathComponent(".claude")
             return try sessions(root: root.appendingPathComponent("projects"), surface: surface)
-        case .claudeChat: return [] // Cloud Chat is not a local Claude Code session store.
+        case .claudeChat, .claudeDesktopCode: return [] // These surfaces have separate stores.
         }
     }
     private static func codex(root: URL, surface: ContinuationSurface) throws -> [ContinuationLocalChat] {
@@ -73,11 +74,13 @@ enum ContinuationDiscovery {
         let columns = try db.rows("PRAGMA table_info(threads)").map { $0[1] }
         let title = columns.contains("name") ? "COALESCE(NULLIF(name, ''), title)" : "title"
         let mode = columns.contains("history_mode") ? "history_mode" : "'legacy'"
-        let rows = try db.rows("SELECT id, \(title), updated_at, rollout_path, source, \(mode) FROM threads ORDER BY updated_at DESC")
+        let cwd = columns.contains("cwd") ? "cwd" : "''"
+        let origin = columns.contains("thread_source") ? "thread_source" : "''"
+        let rows = try db.rows("SELECT id, \(title), updated_at, rollout_path, source, \(mode), \(cwd), \(origin) FROM threads ORDER BY updated_at DESC")
         let history = root.appendingPathComponent("thread_history_1.sqlite")
         return rows.compactMap { row in
             guard !row[4].contains("subagent"), row[4] != "exec" else { return nil }
-            guard (surface == .codexCLI) == (row[4] == "cli") else { return nil }
+            guard (surface == .codexCLI) == (row[4] == "cli" || row[7] == "switchboard-cli") else { return nil }
             let path = URL(fileURLWithPath: row[3], relativeTo: root).standardizedFileURL
             let location: ContinuationLocalChat.Location
             if row[5] == "paginated", fm.fileExists(atPath: history.path) { location = .history(history, row[0]) }
@@ -85,7 +88,8 @@ enum ContinuationDiscovery {
             else { location = .unavailable }
             return .init(chat: .init(id: "local:\(surface.rawValue):\(row[0])", surface: surface,
                 title: row[1].isEmpty ? "Untitled conversation" : String(row[1].prefix(120)), messages: [], omissions: [],
-                importedAt: Date(timeIntervalSince1970: Double(row[2]) ?? 0)), location: location)
+                importedAt: Date(timeIntervalSince1970: Double(row[2]) ?? 0)), location: location,
+                workspace: row[6].hasPrefix("/") ? URL(fileURLWithPath: row[6]) : nil)
         }
     }
     private static func sessions(root: URL, surface: ContinuationSurface) throws -> [ContinuationLocalChat] {
@@ -101,8 +105,12 @@ enum ContinuationDiscovery {
             guard values.isRegularFile == true, values.isSymbolicLink != true else { continue }
             let data = try prefix(url)
             var title: String?
+            var workspace: URL?
             for line in data.split(separator: 10) {
                 guard let row = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+                if let path = (row["cwd"] ?? (row["payload"] as? [String: Any])?["cwd"]) as? String, path.hasPrefix("/") {
+                    workspace = URL(fileURLWithPath: path)
+                }
                 if row["isSidechain"] as? Bool == true { break }
                 if row["type"] as? String == "user", row["isMeta"] as? Bool != true,
                    let message = row["message"] as? [String: Any] {
@@ -115,7 +123,7 @@ enum ContinuationDiscovery {
             if title == nil && surface == .claudeCode { continue }
             let name = String((title ?? url.deletingPathExtension().lastPathComponent).components(separatedBy: .newlines).first?.prefix(120) ?? "Conversation")
             result.append(.init(chat: .init(id: "local:\(surface.rawValue):\(ContinuationFiles.digest(Data(url.path.utf8)))", surface: surface,
-                title: name.isEmpty ? "Conversation" : name, messages: [], omissions: [], importedAt: values.contentModificationDate ?? .distantPast), location: .session(url)))
+                title: name.isEmpty ? "Conversation" : name, messages: [], omissions: [], importedAt: values.contentModificationDate ?? .distantPast), location: .session(url), workspace: workspace))
             guard result.count <= 20_000 else { throw ContinuationError.tooLarge }
         }
         if failed { throw ContinuationError.invalid }

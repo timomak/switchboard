@@ -18,6 +18,8 @@ final class ContinuationModel: ObservableObject {
     @Published var paste = ""
     @Published var preview = false
     @Published var copied = false
+    @Published var openedClaude = false
+    @Published var nativeResult: ContinuationNativeResult?
     var protectPopover: (Bool) -> Void = { _ in }
     private var work: Task<Void, Never>?
     private var generation = UUID()
@@ -44,7 +46,7 @@ final class ContinuationModel: ObservableObject {
         return true
     }
     func load() {
-        guard !loaded else { refresh(); return }; loaded = true
+        guard !loaded else { if page == .choose { refresh() }; return }; loaded = true
         // Imported fallbacks are separate from the read-only native catalog.
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let root = support.appendingPathComponent("Switchboard Continuations", isDirectory: true)
@@ -53,12 +55,14 @@ final class ContinuationModel: ObservableObject {
         refresh()
     }
     func refresh() {
-        guard !simulateExternalActions else { return }
+        guard !simulateExternalActions, page == .choose else { return }
         cancel(); let token = UUID(); generation = token; busy = true; selectedID = nil; message = nil
         localChats = [:]; chats = imports
         let surface = source
+        var discoveryEnvironment = ProcessInfo.processInfo.environment
+        if surface == .codexCLI { discoveryEnvironment["CODEX_HOME"] = ContinuationNative.storageRoot(.codexCLI).path }
         work = Task { [weak self] in
-            let worker = Task.detached(priority: .userInitiated) { try ContinuationDiscovery.catalog(surface: surface) }
+            let worker = Task.detached(priority: .userInitiated) { try ContinuationDiscovery.catalog(surface: surface, environment: discoveryEnvironment) }
             do {
                 let entries = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
                 guard let self, self.generation == token, !Task.isCancelled else { return }
@@ -144,9 +148,11 @@ final class ContinuationModel: ObservableObject {
         } else { beginReview(selected) }
     }
     private func beginReview(_ selected: ContinuationChat) {
-        draft = ContinuationDraft(chat: selected, destination: selected.surface == .claudeChat || selected.surface == .claudeCode ? .codexDesktop : .claudeChat)
-        draft?.omissionsReviewed = !(selected.omissions.contains { $0.contains("attachments") || $0.contains("Unsupported") })
-        message = nil; copied = false; page = .review
+        draft = ContinuationDraft(chat: selected, destination: selected.surface == .claudeChat || selected.surface == .claudeCode ? .codexDesktop : .claudeDesktopCode)
+        if let workspace = localChats[selected.id]?.workspace,
+           FileManager.default.fileExists(atPath: workspace.path) { draft?.workspace = workspace }
+        bundle = nil; nativeResult = nil
+        message = nil; copied = false; openedClaude = false; page = .review
     }
     func addAttachments() {
         protectPopover(true); defer { protectPopover(false) }
@@ -171,33 +177,51 @@ final class ContinuationModel: ObservableObject {
             guard let self, self.generation == token else { return }; self.busy = false
         }
     }
-    func prepare() {
+    func prepare(onReady: (() -> Void)? = nil) {
         guard let draft, let store, !busy else { return }
-        do { try draft.validate() } catch { message = (error as? ContinuationError)?.errorDescription; return }
+        if draft.destination == .claudeChat && !draft.contextOnly {
+            message = ContinuationNativeError.chatUnsupported.errorDescription; return
+        }
+        do { try draft.validate() } catch { message = (error as? LocalizedError)?.errorDescription; return }
+        let existing = bundle
         let token = UUID(); generation = token; busy = true; page = .preparing; message = nil
+        protectPopover(true)
         work = Task { [weak self] in
-            let worker = Task.detached(priority: .userInitiated) { try store.prepare(draft, id: token) }
+            // Complete this short durable operation before allowing navigation;
+            // cancelling after creation must not discard the destination identity.
+            let worker = Task.detached(priority: .userInitiated) { try existing ?? store.prepare(draft, id: token) }
             do {
-                let bundle = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
-                guard let self, self.generation == token, !Task.isCancelled else { try? store.removeBundle(bundle); return }
-                self.bundle = bundle; self.page = .ready
+                let prepared = try await worker.value
+                guard let self else { return }
+                self.bundle = prepared
+                if !draft.contextOnly && !self.simulateExternalActions {
+                    let creator = Task.detached(priority: .userInitiated) { try ContinuationNative.create(draft, bundle: prepared) }
+                    self.nativeResult = try await creator.value
+                }
+                self.page = .ready; self.busy = false; self.protectPopover(false)
+                onReady?()
             } catch {
-                guard let self, self.generation == token, !Task.isCancelled else { return }
-                self.message = (error as? ContinuationError)?.errorDescription ?? "Could not prepare the handoff. Try again."
-                self.page = .review
+                guard let self else { return }
+                if let bundle = self.bundle { self.nativeResult = try? ContinuationNative.saved(bundle) }
+                self.message = (error as? LocalizedError)?.errorDescription ?? "Could not create the conversation. Try again."
+                self.page = self.bundle == nil ? .review : .ready
+                self.busy = false; self.protectPopover(false)
             }
-            guard let self, self.generation == token else { return }; self.busy = false
         }
     }
     func cancel() {
-        generation = UUID(); work?.cancel(); work = nil; busy = false
+        guard page != .preparing else { return }
+        generation = UUID(); work?.cancel(); work = nil
+        if page == .ready && busy { message = "Opening cancelled." }
+        busy = false
         if page == .preparing { page = .review }
     }
     func finish() {
+        guard page != .preparing else { return }
         cancel()
         // Successful bundles remain usable after opening the destination. The
         // user can remove them explicitly; never expire a referenced file mid-chat.
-        bundle = nil; draft = nil; copied = false; message = nil; page = .choose
+        bundle = nil; nativeResult = nil; draft = nil; copied = false; openedClaude = false; message = nil; page = .choose
     }
     func copyContext() {
         if simulateExternalActions { copied = true; return }
@@ -207,10 +231,56 @@ final class ContinuationModel: ObservableObject {
         if !copied { message = "Could not copy. Try again." }
     }
     func openDestination(openCLI: (String, String?) -> Void) {
+        guard !busy else { return }
         if simulateExternalActions { message = "Fixture: destination opening not executed."; return }
         guard let bundle else { return }
+        if draft?.contextOnly != true {
+            guard let result = nativeResult, result.verified else { message = ContinuationNativeError.verification.errorDescription; return }
+            do {
+                if result.destination == .codexDesktop {
+                    let url = try ContinuationNative.codexLink(result)
+                    guard NSWorkspace.shared.open(url) else { message = "Conversation created. Could not open Codex; try Open again."; return }
+                } else if result.destination == .claudeDesktopCode {
+                    let script = try ContinuationNative.terminalScript(result, backend: resolveBinary("ai-usagebar"))
+                    let token = UUID(); generation = token; busy = true; message = nil
+                    work = Task { [weak self] in
+                        let worker = Task.detached(priority: .userInitiated) {
+                            try ContinuationDesktopHandoff.run(script: script, directory: bundle.directory)
+                        }
+                        do {
+                            try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+                            guard let self, self.generation == token, !Task.isCancelled else { return }
+                            self.openedClaude = true
+                        } catch {
+                            guard let self, self.generation == token, !Task.isCancelled else { return }
+                            self.message = (error as? LocalizedError)?.errorDescription ?? ContinuationHandoffError.failed.errorDescription
+                        }
+                        guard let self, self.generation == token else { return }; self.busy = false
+                    }
+                } else {
+                    runInTerminal(try ContinuationNative.terminalScript(result, backend: resolveBinary("ai-usagebar")))
+                }
+            } catch { message = (error as? LocalizedError)?.errorDescription }
+            return
+        }
+        if bundle.receipt.destination == .claudeChat {
+            guard !busy else { return }
+            let token = UUID(); generation = token; busy = true; message = nil
+            work = Task { [weak self] in
+                do {
+                    try await ContinuationClaude.open(context: bundle.context)
+                    guard let self, self.generation == token, !Task.isCancelled else { return }
+                    self.openedClaude = true
+                } catch {
+                    guard let self, self.generation == token, !Task.isCancelled else { return }
+                    self.message = (error as? ContinuationClaude.Failure)?.errorDescription ?? "Could not open the Claude draft. Try again."
+                }
+                guard let self, self.generation == token else { return }; self.busy = false
+            }
+            return
+        }
         switch bundle.receipt.destination {
-        case .claudeCode: openCLI("claude", draft?.workspace?.path)
+        case .claudeCode, .claudeDesktopCode: openCLI("claude", draft?.workspace?.path)
         case .codexCLI: openCLI("codex", draft?.workspace?.path)
         case .claudeChat, .codexDesktop:
             let ids = bundle.receipt.destination == .claudeChat ? ["com.anthropic.claudefordesktop"] : ["com.openai.codex"]
@@ -238,7 +308,7 @@ struct ContinuationView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button { back() } label: { Image(systemName: "chevron.left") }.buttonStyle(.plain).help("Back")
+                Button { back() } label: { Image(systemName: "chevron.left") }.buttonStyle(.plain).help("Back").disabled(model.page == .preparing)
                 Text("Continue in another app").fontWeight(.medium)
                 Spacer()
                 Image(systemName: "arrow.left.arrow.right").foregroundStyle(.secondary)
@@ -263,15 +333,21 @@ struct ContinuationView: View {
             }
             Divider()
             HStack {
-                if model.busy { Button("Cancel") { model.cancel() } }
+                if model.busy { Button("Cancel") { model.cancel() }.disabled(model.page == .preparing) }
                 else { Button(model.page == .ready ? "Done" : "Cancel") { model.finish(); close() } }
                 Spacer()
                 if model.page == .choose {
                     Button("Next") { model.review(); advanced = false }.disabled(model.selected == nil || model.busy).keyboardShortcut(.defaultAction)
                 } else if model.page == .review {
-                    Button("Prepare") { model.prepare() }.disabled(!canPrepare || model.busy).keyboardShortcut(.defaultAction)
+                    Button("Continue") { model.prepare {
+                        model.openDestination(openCLI: openCLI)
+                    } }.disabled(!canPrepare || model.busy).keyboardShortcut(.defaultAction)
                 } else if model.page == .ready, let bundle = model.bundle {
-                    Button("Open \(bundle.receipt.destination.title)") { model.openDestination(openCLI: openCLI) }.keyboardShortcut(.defaultAction)
+                    if model.draft?.contextOnly != true && model.nativeResult?.verified != true {
+                        Button("Retry") { model.prepare { model.openDestination(openCLI: openCLI) } }.disabled(model.busy)
+                    } else {
+                        Button("Open \(bundle.receipt.destination.title)") { model.openDestination(openCLI: openCLI) }.disabled(model.busy).keyboardShortcut(.defaultAction)
+                    }
                 }
             }.padding(12)
         }.font(.system(size: 13)).frame(height: min(440, height))
@@ -290,7 +366,7 @@ struct ContinuationView: View {
             Text("1 OF 2").font(.caption).foregroundStyle(.secondary)
             Text("Choose a conversation").font(.title3).fontWeight(.semibold)
             Picker("From", selection: $model.source) {
-                ForEach(ContinuationSurface.allCases) { Text($0.title).tag($0) }
+                ForEach(ContinuationSurface.sources) { Text($0.title).tag($0) }
             }.onChange(of: model.source) { _, _ in model.selectedID = nil; model.query = ""; model.refresh() }
                 .disabled(model.busy)
             TextField("Search chats…", text: $model.query).textFieldStyle(.roundedBorder).accessibilityLabel("Search chats")
@@ -337,7 +413,7 @@ struct ContinuationView: View {
     }
     private var canPrepare: Bool {
         guard let draft = model.draft else { return false }
-        return (try? draft.validate()) != nil
+        return (draft.destination != .claudeChat || draft.contextOnly) && (try? draft.validate()) != nil
     }
     private func binding<Value>(_ key: WritableKeyPath<ContinuationDraft, Value>, fallback: Value) -> Binding<Value> {
         Binding(get: { model.draft?[keyPath: key] ?? fallback }, set: { model.draft?[keyPath: key] = $0 })
@@ -354,17 +430,21 @@ struct ContinuationView: View {
                 Picker("App", selection: binding(\.destination, fallback: .codexDesktop)) {
                     ForEach(ContinuationSurface.allCases) { Text($0.title).tag($0) }
                 }
-                if draft.context.utf8.count > ContinuationLimits.inlineContext {
-                    Text("Too much context. Choose a later starting message under Advanced.").font(.caption)
-                }
-                if draft.omissions.contains(where: { $0.contains("attachments") || $0.contains("Unsupported") }) {
-                    Toggle("Continue with omitted content", isOn: binding(\.omissionsReviewed, fallback: false))
-                    DisclosureGroup("\(draft.omissions.count) omissions") {
-                        ForEach(draft.omissions, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
-                    }
+                if draft.destination == .claudeChat && !draft.contextOnly {
+                    Text("Chat supports context handoff only.").font(.caption).foregroundStyle(.secondary)
                 }
                 DisclosureGroup("Advanced", isExpanded: $advanced) {
                     VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Context handoff instead of clone", isOn: binding(\.contextOnly, fallback: false))
+                        if draft.contextOnly && draft.context.utf8.count > ContinuationLimits.inlineContext {
+                            Text("Too much context. Choose a later starting message.").font(.caption)
+                        }
+                        if !draft.omissions.isEmpty {
+                            Toggle("Continue with omitted content", isOn: binding(\.omissionsReviewed, fallback: true))
+                            DisclosureGroup("\(draft.omissions.count) omissions") {
+                                ForEach(draft.omissions, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
+                            }
+                        }
                         HStack {
                             Text(draft.workspace?.lastPathComponent ?? "No project folder").lineLimit(1)
                             Spacer()
@@ -388,7 +468,6 @@ struct ContinuationView: View {
                             }
                         }
                         Button("Preview transcript") { model.preview = true }
-                        ForEach(draft.omissions, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
                     }.padding(.top, 8)
                 }
             }
@@ -396,23 +475,32 @@ struct ContinuationView: View {
     }
     private var ready: some View {
         Group {
-            Image(systemName: "checkmark.circle.fill").font(.largeTitle).foregroundStyle(.green).frame(maxWidth: .infinity)
-            Text("Ready to continue").font(.title3).fontWeight(.semibold).frame(maxWidth: .infinity)
+            Image(systemName: model.nativeResult?.verified == true || model.draft?.contextOnly == true ? "checkmark.circle.fill" : "exclamationmark.circle")
+                .font(.largeTitle).foregroundStyle(model.nativeResult?.verified == true || model.draft?.contextOnly == true ? Color.green : Color.secondary).frame(maxWidth: .infinity)
+            Text(model.draft?.contextOnly == true ? "Context prepared" : model.nativeResult?.verified == true ? (model.nativeResult?.destination == .claudeDesktopCode ? "Ready in Claude Code" : "Conversation cloned") : "Needs attention").font(.title3).fontWeight(.semibold).frame(maxWidth: .infinity)
             Text(model.draft?.chat.title ?? "").foregroundStyle(.secondary).lineLimit(2)
-            Button(model.copied ? "Copied" : "Copy context") { model.copyContext() }
             if let bundle = model.bundle {
-                DisclosureGroup("Details") {
+                DisclosureGroup("Advanced") {
                     VStack(alignment: .leading, spacing: 8) {
+                        if let result = model.nativeResult, result.destination == .claudeDesktopCode, result.verified {
+                            Button("Open in Terminal") {
+                                do { runInTerminal(try ContinuationNative.terminalScript(result, backend: resolveBinary("ai-usagebar"))) }
+                                catch { model.message = (error as? LocalizedError)?.errorDescription }
+                            }.disabled(model.busy)
+                        }
+                        if let result = model.nativeResult { Text("Session: " + result.id).font(.caption).textSelection(.enabled) }
+                        Button(model.copied ? "Copied" : "Copy context") { model.copyContext() }
                         ForEach(bundle.receipt.files, id: \.self) { Text($0).font(.caption) }
                         Button("Show files") { NSWorkspace.shared.activateFileViewerSelecting([bundle.directory]) }
                         ForEach(bundle.receipt.omissions, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
-                        Button("Delete prepared files") {
+                        if model.nativeResult == nil && model.draft?.contextOnly == true { Button("Delete prepared files") {
                             do { try model.store?.removeBundle(bundle); model.finish() }
                             catch { model.message = "Could not delete prepared files." }
-                        }
+                        } }
                     }
                 }
             }
+            if model.busy { ProgressView("Opening Claude…").controlSize(.small) }
         }
     }
     private var pasteSheet: some View {
@@ -428,6 +516,7 @@ struct ContinuationView: View {
         }.padding(20).frame(width: 560, height: 350)
     }
     private func back() {
+        guard model.page != .preparing else { return }
         model.cancel()
         switch model.page {
         case .choose: close()

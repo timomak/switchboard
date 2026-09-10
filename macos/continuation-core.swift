@@ -2,20 +2,22 @@ import Foundation
 import CryptoKit
 import Darwin
 
-// No provider APIs, credentials or native history writes. Native catalogs are
-// read-only; the portable library contains explicitly imported fallbacks.
+// Source catalogs are read-only. Destination session creation is owned by
+// continuation-native.swift; portable imports remain separate from native stores.
 enum ContinuationSurface: String, Codable, CaseIterable, Identifiable {
-    case claudeChat, claudeCode, codexDesktop, codexCLI
+    case claudeChat, claudeCode, codexDesktop, codexCLI, claudeDesktopCode
     var id: String { rawValue }
     var title: String {
         switch self {
         case .claudeChat: return "Claude Desktop · Chat"
         case .claudeCode: return "Claude Code · CLI"
+        case .claudeDesktopCode: return "Claude Desktop · Code"
         case .codexDesktop: return "Codex Desktop"
         case .codexCLI: return "Codex CLI"
         }
     }
     var isCLI: Bool { self == .claudeCode || self == .codexCLI }
+    static var sources: [Self] { [.codexDesktop, .codexCLI, .claudeCode, .claudeChat] }
 }
 
 enum ContinuationError: LocalizedError {
@@ -228,7 +230,8 @@ struct ContinuationDraft {
     var summary = ""
     var nextStep = "Continue from the last request."
     var files: [ContinuationAttachment] = []
-    var omissionsReviewed = false
+    var omissionsReviewed = true
+    var contextOnly = false
     var context: String {
         let selection = chat.messages.dropFirst(firstMessage)
         let transcript = selection.map { message in
@@ -253,7 +256,7 @@ struct ContinuationDraft {
     }
     func validate() throws {
         guard chat.messages.indices.contains(firstMessage) else { throw ContinuationError.invalid }
-        guard context.utf8.count <= ContinuationLimits.inlineContext,
+        guard context.utf8.count <= (contextOnly ? ContinuationLimits.inlineContext : ContinuationLimits.transcript + 100_000),
               files.count <= ContinuationLimits.files,
               files.reduce(context.utf8.count, { $0 + $1.size }) <= ContinuationLimits.bundle else { throw ContinuationError.tooLarge }
         guard omissions.isEmpty || omissionsReviewed else { throw ContinuationError.invalid }
@@ -269,7 +272,7 @@ struct ContinuationReceipt: Codable {
     let omissions: [String]
     let files: [String]
     let originalFileNames: [String]
-    // No destination thread ID: preparing a bundle does not create a thread.
+    // A separate destination.json is written only by the native creator.
 }
 
 struct ContinuationBundle {
@@ -338,5 +341,19 @@ struct ContinuationStore {
         guard bundle.directory.deletingLastPathComponent().standardizedFileURL == root.standardizedFileURL,
               bundle.directory.lastPathComponent == bundle.receipt.id.uuidString else { throw ContinuationError.storage }
         try FileManager.default.removeItem(at: bundle.directory)
+    }
+}
+
+/// Claude's documented new-chat route. Stay below its roughly 14,000-character
+/// truncation threshold; larger transcripts use the native composer path.
+enum ContinuationClaudeLink {
+    static let promptLimit = 12_000
+    static func make(prompt: String) throws -> URL {
+        guard prompt.utf16.count <= promptLimit else { throw ContinuationError.tooLarge }
+        var parts = URLComponents()
+        parts.scheme = "claude"; parts.host = "claude.ai"; parts.path = "/new"
+        parts.queryItems = [URLQueryItem(name: "q", value: prompt)]
+        guard let url = parts.url else { throw ContinuationError.invalid }
+        return url
     }
 }
