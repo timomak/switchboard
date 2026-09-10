@@ -1,5 +1,5 @@
 //! Conservative admission guard for saved tasks bound to a provider ID.
-//! No database/rollout mutation, credential retention, or model migration.
+//! No database/rollout mutation or model migration. Managed keys compare independently.
 use super::*;
 use std::{
     collections::BTreeSet,
@@ -7,9 +7,9 @@ use std::{
 };
 
 const INSPECT: &str = "Could not inspect saved Codex task provider bindings. No connection change was applied; preserve the task stores and resolve their readability/schema before retrying.";
-const BOUND: &str = "Saved Codex tasks still reference a provider this change would remove or rebind. No connection change was applied. Keep the current connection until a reviewed provider-retention or per-task migration plan is available; task identities and provider values are omitted for privacy.";
+const BOUND: &str = "Saved Codex tasks still reference a provider this change would remove or rebind. No connection change was applied. For legacy or Bedrock tasks keep the original connection. For a changed managed endpoint/key, restore its original source fields or register a new connection; task identities and provider values are omitted for privacy.";
 
-fn references(home: &Path) -> Result<BTreeSet<String>> {
+pub(super) fn references(home: &Path) -> Result<BTreeSet<String>> {
     let mut ids = BTreeSet::new();
     for entry in std::fs::read_dir(home).map_err(|_| error(INSPECT))? {
         let entry = entry.map_err(|_| error(INSPECT))?;
@@ -98,13 +98,15 @@ pub(super) fn ensure_transition(
     home: &Path,
     before: Option<&str>,
     after: Option<&str>,
-    environment_changed: bool,
+    before_env: Option<&str>,
+    after_env: Option<&str>,
 ) -> Result<()> {
     let parse = |s: Option<&str>| {
         toml::from_str::<toml::Value>(s.unwrap_or("")).map_err(|_| {
             error("Cannot compare Codex provider definitions; configuration is invalid.")
         })
     };
+    let environment_changed = before_env != after_env;
     let before = parse(before)?;
     let after = parse(after)?;
     let old = before.get("model_providers");
@@ -115,9 +117,39 @@ pub(super) fn ensure_transition(
     for id in references(home)? {
         let previous = old.and_then(|p| p.get(&id));
         let next = new.and_then(|p| p.get(&id));
-        if previous != next || ((previous.is_some() || next.is_some()) && environment_changed) {
+        let credentials_changed = if let Some(key) = managed_key(&id) {
+            optional_credential_line(before_env, &key)?
+                != optional_credential_line(after_env, &key)?
+        } else {
+            environment_changed
+        };
+        if previous != next || ((previous.is_some() || next.is_some()) && credentials_changed) {
             return Err(error(BOUND));
         }
     }
     Ok(())
+}
+
+// Compare literal private runtime assignments without interpreting arbitrary dotenv syntax.
+pub(super) fn optional_credential_line<'a>(
+    env: Option<&'a str>,
+    key: &str,
+) -> Result<Option<&'a str>> {
+    let mut found = None;
+    for line in env.unwrap_or("").lines() {
+        let candidate = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+        if candidate
+            .split_once('=')
+            .is_some_and(|(k, _)| k.trim() == key)
+            && found.replace(line).is_some()
+        {
+            return Err(error(
+                "A managed credential is duplicated. Preserve .env and resolve the duplicate before switching.",
+            ));
+        }
+    }
+    Ok(found)
+}
+pub(super) fn credential_line<'a>(env: Option<&'a str>, key: &str) -> Result<&'a str> {
+    optional_credential_line(env, key)?.ok_or_else(|| error("A saved task's managed credential is missing. Restore its original private .env entry or revoke/retire that connection; no fallback credential was selected."))
 }

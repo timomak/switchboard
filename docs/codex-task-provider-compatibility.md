@@ -1,29 +1,88 @@
 # Codex saved-task provider compatibility
 
-## Immediate policy implemented in this cleanup
+New Azure OpenAI and OpenAI-compatible connections receive a persisted, random
+`switchboard_<id>` provider identity at registration and a distinct
+`SWITCHBOARD_KEY_<ID>` runtime credential variable. Neither is derived from the
+label or secret. Renaming a label does not change routing. Existing records are
+not silently migrated from `custom` or `azure`.
 
-A saved task's provider ID is a persistent routing dependency. Preserving conversation files while removing or replacing that dependency is not compatible switching.
+Selecting a default and retaining a saved task's dependencies are separate
+operations. On subscription return or connection A → B, Switchboard retains
+referenced managed definitions and their exact credential assignments in the
+same home's `config.toml` and private `.env`. It restores the subscription's
+default/model settings and preserves unrelated settings. Conversation bodies,
+provider metadata, pins, projects, workflows and authentication files are not
+rewritten. If no tasks reference the outgoing connection, the original config
+and environment are restored without adding retention material.
 
-Before applying a connection transition, inspect provider bindings from versioned `state_<number>.sqlite` databases using read-only connections and from the first metadata line of rollouts in `sessions/` and `archived_sessions/`. Union both sources; agreement is not assumed. Do not parse conversation bodies, follow symlinks, rewrite rows or rewrite rollouts. Unreadable stores, unknown queried schemas or malformed metadata block the operation with a value-free error.
+References are the union of read-only `state_<number>.sqlite` thread provider
+IDs and first-line metadata in `sessions/` and `archived_sessions/`. Unindexed
+and archived tasks count. Unreadable stores, unknown queried schemas, symlinks
+and malformed metadata stop switching with a value-free error. References are
+checked again after shutdown; newly created managed dependencies are added to
+the exact journaled write. Recovery also preserves managed dependencies and
+refuses outside edits or ambiguous credential rebinding.
 
-If a referenced provider definition would be removed, introduced under a previously unresolved referenced ID, or changed, refuse the transition. If a referenced configured provider remains defined but the runtime environment changes, also refuse: credential rebinding can change the destination account even when the URL is unchanged. This environment comparison is intentionally conservative and may reject unrelated environment edits.
+## Credential lifetime and changes
 
-Recheck after quitting, before writing configuration or the pending journal, because a task can be created between planning and shutdown. Apply the same check during recovery so rollback cannot bypass the policy. Keep the existing configuration/credential environment and task records untouched on refusal. No automatic migration, credential retention, or fallback to another provider/model is permitted.
+Selecting a connection copies its selected source key into the private runtime
+`.env`. Saved tasks keep that copy available after returning to subscription,
+so resuming them can still contact and charge the original provider. The source
+file is read on selection, never edited. Removing or rotating the source file
+alone does **not** revoke a retained runtime key. Private recovery snapshots also
+contain credential copies; private permissions are not encryption.
 
-This is a conservative admission guard, not seamless cross-provider continuation. Returning to subscription after creating a provider-bound task can now be blocked. The fixtures model `subscription → compatible → create task → request subscription → safe refusal → resolve/reopen against the preserved provider`; they do not claim successful subscription return or a live Codex reopen. Switching between two compatible endpoints under the reused `custom` ID is likewise refused when referenced. Existing round-trip tests without provider-bound tasks still pass.
+Retention has no automatic expiry or garbage collection in this version.
+Retained credentials remain until explicitly retired locally or revoked at the
+provider. Revoke credentials at the provider to end access, then, with Codex and
+its CLI sessions stopped, remove the corresponding managed definition and
+credential line together from the home and retire its saved connection record
+and private recovery snapshots. Keep a private backup if manual recovery is
+needed. Removing dependencies makes those historical tasks unavailable; no
+fallback or automatic migration is supplied. Do not publish these files.
 
-## Deliberate design for eventual successful return
+Changing a referenced identity's endpoint or key is refused, including when the
+new key might be a rotation within the same account: Switchboard cannot prove
+that account relationship from a key string. Restore the original source fields
+or register a new named connection for future tasks. Historical tasks retain
+the old definition/key; a revoked key fails authentication. Rebinding historical
+tasks to a rotated key or another endpoint requires deliberate manual migration
+and is not automated. A missing runtime credential stops a managed transition;
+it never borrows another connection's credential.
 
-1. Give each saved routing identity a persisted, opaque provider ID at registration. Do not use the shared `custom`/`azure` IDs for new identities or derive IDs from credentials. Renaming a display label must not change the provider ID. A changed endpoint, tenant/account scope, protocol or incompatible credential mapping creates a new identity; it must never silently repoint an existing ID.
-2. Selecting a default provider and retaining definitions for historical tasks are separate operations. A subscription return may change the default/model settings only after every saved provider dependency remains resolvable. A referenced provider definition cannot be retired or reused without validated migration. An unreferenced definition can be retired only after accounting for archived/unindexed rollouts and concurrent task creation.
-3. Define credential lifetime explicitly before retaining any runtime material. Compatible/Azure providers would need distinct supported credential bindings per provider identity, rotation semantics for the same account, and actionable errors when credentials are unavailable. Returning to subscription must not silently grant indefinite storage or access to old credentials. Bedrock's existing shared AWS environment cannot be assumed to support simultaneous identities. Verify the official runtime's behavior before enabling such retention. Until then, keep the admission guard.
-4. Treat existing `custom`, `azure` and native adapter references as legacy dependencies. A name alone cannot prove endpoint/account/model provenance. Use authorized local recovery evidence to establish a mapping; never infer it from today's connection or globally rewrite those IDs.
-5. Explicit migration must be per-task (or a specifically reviewed set), with proven source/target protocol and model compatibility, backups of the DB row and rollout, coordinated quiescence, matching metadata changes, unchanged conversation-body bytes, and rollback. Validate actual reopening only in an authorized live session. A successful one-off migration is not a universal model/provider compatibility claim.
+## Adapter scope
 
-Stable IDs, retained definitions, credential lifetime/retirement, and a migration UI are design work recorded here, not implemented or enabled by this bounded cleanup. They need separate review before a public compatibility claim or cutover. The current implementation neither changes the saved connection schema nor extends credential lifetime.
+| Adapter | Saved-task switching behavior |
+| --- | --- |
+| New OpenAI-compatible Responses connection | Stable identity, per-identity key, retained definitions; subscription return and A → B supported. |
+| New Azure OpenAI connection | Same retention; resource endpoint normalized to `/openai/v1`; the configured model is an Azure deployment ID. |
+| Existing `custom` / `azure` records | Legacy guard remains. A reference alone cannot establish the original endpoint/account. Returning to subscription may be refused; register a new connection for future tasks. |
+| Codex Amazon Bedrock | Native `amazon-bedrock` adapter uses shared AWS token/region variables. No claim of simultaneous independent AWS identities. Referenced tasks can block subscription return or credential changes; safe refusal is not successful switching. |
+| Claude Bedrock | Separate native third-party workspace and credential helper; not a Codex provider adapter. Subscription chats stay in their subscription workspace. One saved connection is supported. |
 
-## Fixture coverage and limits
+No provider model access, OAuth login, AWS account access or arbitrary model
+compatibility is inferred from these local checks. Existing workflow model
+overrides may need adjustment by their owner. External homes, offline/removed
+stores, independent editors and future runtime layouts are outside this guard.
 
-Tests cover DB+rollout references during subscription return; two endpoints using the same source-field names; DB-only and archived-rollout-only references created after preparation; invalid DB schema/data; credential-environment rebinding; and recovery refusal. They verify unchanged task/configuration bytes and local provider resolution. All paths are temporary; no provider requests, live SQLite stores, login flows or installed apps are used.
+## Evidence
 
-The guard recognizes the current file naming/layout and first-line metadata contract. It is not a general importer or a guarantee for external homes, removed/offline stores, future layouts, direct configuration editors or independently running tools. Unknown inspected schema/layout is a reason to stop and review, not to guess a provider. Official runtime auth/model access and full live reopen remain unverified.
+Hermetic Rust fixtures cover both managed adapters, subscription → A → saved
+task → subscription, A → B with identical source variable names, archived and
+DB-only tasks, creation during shutdown, endpoint/key rebinding, missing source
+and runtime credentials, partial-write recovery, outside edits, legacy guards,
+and Bedrock's shared environment. They assert unchanged conversation and DB
+bytes. Claude connection recovery and capture admission have separate tests.
+
+`python3 scripts/test-codex-provider-runtime.py` is an opt-in probe of the official
+runtime installed on PATH. On Codex CLI **0.151.0**, its app-server implicitly
+resumed A after the default returned to built-in OpenAI or changed to B, keeping
+A's provider, model, loopback URL and distinct key. B used its own Azure-shaped
+`/openai/v1` URL and key. Simulated 401 and missing-key cases failed without
+falling back to the default. The probe uses disposable homes, synthetic keys and
+a loopback Responses server; it does not exercise paid inference, Azure service
+access, subscription OAuth or the desktop UI. Existing user-tested switching is
+not repeated or replaced by this evidence.
+
+See the official [provider configuration](https://learn.chatgpt.com/docs/config-file/config-advanced)
+and [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).

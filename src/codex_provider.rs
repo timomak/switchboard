@@ -103,6 +103,9 @@ pub enum Action {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub label: String,
+    /// Absent for legacy records, which retain their guarded routing IDs.
+    #[serde(default)]
+    pub routing_id: Option<String>,
     pub provider: Provider,
     pub source: PathBuf,
     pub model: Option<String>,
@@ -124,6 +127,25 @@ impl Bindings {
     }
 }
 impl Profile {
+    fn provider_id(&self) -> Result<String> {
+        if !matches!(self.provider, Provider::Bedrock)
+            && let Some(id) = &self.routing_id
+        {
+            if managed_key(id).is_none() {
+                return Err(error("Invalid saved connection routing identity."));
+            }
+            return Ok(id.clone());
+        }
+        Ok(match self.provider {
+            Provider::Azure => "azure",
+            Provider::Compatible => "custom",
+            Provider::Bedrock => "amazon-bedrock",
+        }
+        .into())
+    }
+    fn runtime_key(&self) -> Result<String> {
+        Ok(managed_key(&self.provider_id()?).unwrap_or_else(|| self.bindings().credential_key))
+    }
     fn bindings(&self) -> Bindings {
         self.bindings.clone().unwrap_or_else(|| {
             let mut b = self.provider.defaults();
@@ -134,6 +156,15 @@ impl Profile {
             b
         })
     }
+}
+// IDs and credential variable names are opaque and independent of labels/secrets.
+fn managed_key(id: &str) -> Option<String> {
+    let suffix = id.strip_prefix("switchboard_")?;
+    (suffix.len() == 32
+        && suffix
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+    .then(|| format!("SWITCHBOARD_KEY_{}", suffix.to_ascii_uppercase()))
 }
 fn templates() -> Value {
     json!([Provider::Azure,Provider::Bedrock,Provider::Compatible].iter().map(|p| {
@@ -318,7 +349,11 @@ fn stage(root: &Path, profile: &Profile) -> Result<()> {
             "That saved connection already exists. Choose another label.",
         ));
     }
-    let bytes = serde_json::to_vec_pretty(profile)
+    let mut profile = profile.clone();
+    if !matches!(profile.provider, Provider::Bedrock) {
+        profile.routing_id = Some(format!("switchboard_{}", uuid::Uuid::new_v4().simple()));
+    }
+    let bytes = serde_json::to_vec_pretty(&profile)
         .map_err(|_| error("Could not encode provider profile."))?;
     cache::atomic_write(&target, &bytes)
 }
@@ -446,9 +481,11 @@ fn verify(profile: &Profile, home: &Path) -> Result<Value> {
     if let Some(model) = &profile.model {
         proposal.insert("model".into(), toml::Value::String(model.clone()));
     }
+    let provider_id = profile.provider_id()?;
+    let runtime_key = profile.runtime_key()?;
     match profile.provider {
         Provider::Azure => {
-            proposal.insert("model_provider".into(), "azure".into());
+            proposal.insert("model_provider".into(), provider_id.clone().into());
             let mut endpoint = reqwest::Url::parse(
                 &values[bindings
                     .endpoint_key
@@ -458,12 +495,12 @@ fn verify(profile: &Profile, home: &Path) -> Result<Value> {
             .map_err(|_| error("Azure endpoint is invalid."))?;
             endpoint.set_path("/openai/v1");
             let base = endpoint.as_str();
-            let provider = json!({"name":"Azure","base_url":base,"env_key":bindings.credential_key,"wire_api":"responses"});
+            let provider = json!({"name":"Azure","base_url":base,"env_key":runtime_key,"wire_api":"responses"});
             let provider: toml::Value = serde_json::from_value(provider)
                 .map_err(|_| error("Could not prepare Azure config."))?;
             proposal.insert(
                 "model_providers".into(),
-                toml::Value::Table([(String::from("azure"), provider)].into_iter().collect()),
+                toml::Value::Table([(provider_id.clone(), provider)].into_iter().collect()),
             );
         }
         Provider::Bedrock => {
@@ -475,8 +512,13 @@ fn verify(profile: &Profile, home: &Path) -> Result<Value> {
             proposal.insert("model_providers".into(), provider);
         }
         Provider::Compatible => {
-            proposal.insert("model_provider".into(), "custom".into());
-            let provider: toml::Value=serde_json::from_value(json!({"custom":{"name":profile.label,"base_url":values[bindings.endpoint_key.as_deref().ok_or_else(|| error("Endpoint mapping missing."))?],"env_key":bindings.credential_key,"wire_api":"responses"}})).map_err(|_| error("Could not prepare custom provider config."))?;
+            let name = if profile.routing_id.is_some() {
+                "Switchboard connection"
+            } else {
+                &profile.label
+            };
+            proposal.insert("model_provider".into(), provider_id.clone().into());
+            let provider: toml::Value=serde_json::from_value(json!({(provider_id):{"name":name,"base_url":values[bindings.endpoint_key.as_deref().ok_or_else(|| error("Endpoint mapping missing."))?],"env_key":runtime_key,"wire_api":"responses"}})).map_err(|_| error("Could not prepare custom provider config."))?;
             proposal.insert("model_providers".into(), provider);
         }
     }
@@ -520,6 +562,7 @@ pub fn run(action: &Action) -> i32 {
                 stage(
                     &root,
                     &Profile {
+                        routing_id: None,
                         label: label.clone(),
                         provider: *provider,
                         source: source.clone(),
@@ -593,6 +636,7 @@ mod tests {
         )
         .unwrap();
         let profile = Profile {
+            routing_id: None,
             label: "work".into(),
             provider: Provider::Bedrock,
             source,
@@ -639,6 +683,7 @@ mod tests {
         }
         std::fs::write(&source,"AZURE_FOUNDRY_API_KEY=fixture-secret\nAZURE_OPENAI_ENDPOINT=https://untrusted.example\n").unwrap();
         let p = Profile {
+            routing_id: None,
             label: "azure".into(),
             provider: Provider::Azure,
             source: source.clone(),
@@ -662,6 +707,7 @@ mod tests {
         )
         .unwrap();
         let profile = Profile {
+            routing_id: None,
             label: "Team gateway".into(),
             provider: Provider::Compatible,
             source,
@@ -674,6 +720,12 @@ mod tests {
         };
         let result = verify(&profile, &tmp.path().join("home")).unwrap();
         assert_eq!(result["configured_model"], "future-org-model");
+        let proposal: toml::Value =
+            toml::from_str(result["proposed_config"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            proposal["model_providers"]["custom"]["name"].as_str(),
+            Some("Team gateway")
+        );
         assert!(result.get("catalog_models").is_none());
         assert_eq!(result["model_access"], "not-checked");
         assert!(!result.to_string().contains("fixture-secret"));

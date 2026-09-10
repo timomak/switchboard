@@ -21,7 +21,7 @@ cd switchboard
 ./macos/bundle.sh
 ```
 
-The app and ZIP are written to `dist/`. The current bundle script sets `SwitchboardPreview=true`, which disables account-changing UI actions and global shortcuts. Building does not install or launch the app. Backend commands are described in the guides below.
+The app and ZIP are written to `dist/`. Builds enable account switching and shortcuts by default (`--switching-enabled`). Use `./macos/bundle.sh --preview` for a guarded UI preview; its ZIP has a `-preview` suffix. Building does not install or launch the app. Backend commands are described in the guides below.
 
 For Developer ID signing and notarization, see [macOS distribution](docs/macos-distribution.md). Signing credentials belong in your local Keychain and are not included in this repository.
 
@@ -29,7 +29,7 @@ For Developer ID signing and notarization, see [macOS distribution](docs/macos-d
 
 Claude Desktop and CLI logins are independent. Codex CLI can share the Desktop home or use a separate authenticated home. Use the backend CLI launcher when commands should follow the selected CLI mode; an ordinary `codex` invocation follows its own environment.
 
-Saved tasks can depend on a specific provider. Switchboard refuses changes that would remove or rebind a referenced provider. This can block returning to subscription after creating provider-bound tasks. See [provider compatibility](docs/codex-task-provider-compatibility.md) for details.
+Saved tasks can depend on a specific provider. New Compatible and Azure connections retain their own provider definitions and credentials when returning to subscription or selecting another connection. Legacy connections and Codex Bedrock still refuse changes that would remove or rebind a referenced provider, which can block subscription return. See [provider compatibility](docs/codex-task-provider-compatibility.md) for details.
 
 - [Desktop and CLI guide](docs/desktop-cli-switchboard.md)
 - [Claude accounts](docs/claude-accounts.md)
@@ -49,6 +49,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked --lib codex_account::
 cargo test --locked --lib codex_provider::
 cargo test --locked --lib claude_connection::
+cargo test --locked --lib claude_desktop::capture::
 ./macos/run-tests.sh
 ```
 
