@@ -1,0 +1,22 @@
+title = "Switchboard secret detection"
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+# Exact documented placeholders, scoped to the original documentation file.
+[[rules.allowlists]]
+description = "Synthetic OpenRouter documentation keys"
+condition = "AND"
+paths = ['''(^|/)docs/openrouter-accounts\.md$''']
+regexTarget = "secret"
+regexes = ['''^sk-or-v1-(default|personal)$''']
+
+# Stable hash of fixture account metadata; not an API credential.
+[[rules.allowlists]]
+description = "Kiro fixture account identity hash"
+condition = "AND"
+paths = ['''(^|/)src/kiro/db\.rs$''']
+regexTarget = "secret"
+regexes = ['''^8b4d254cee50ffb1116ee414d5b91b93239e7507$''']

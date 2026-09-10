@@ -1,0 +1,58 @@
+/target
+**/*.rs.bk
+
+# Sandbox marker, not part of the project.
+.ai-jail
+
+# Claude Code local scratch state.
+.claude/
+
+# Local secrets — never commit
+.env
+.env.local
+*.credentials.json
+
+# Snapshot review files from `cargo insta`
+*.snap.new
+
+# makepkg build outputs (kept out of the source repo)
+packaging/aur/pkg/
+packaging/aur/src/
+packaging/aur/*.pkg.tar.*
+packaging/aur/*.tar.gz
+
+# GNOME extension - compiled schema (build artifact)
+gnome-extension/schemas/gschemas.compiled
+
+# Compiled macOS menu bar app (built by macos/build.sh)
+macos/ai-usagebar-menubar
+
+# Local screenshots for PR bodies (not tracked; drag into the PR on GitHub)
+macos/printscreen/
+
+# Native fork bundle and archive
+/dist/
+
+# Local credentials, profile stores, recovery exports and diagnostic bundles.
+.env.*
+!.env.example
+!.env.sample
+*.credentials.*
+auth.json
+auth.json.*
+.claude-acc/
+.codex/
+*.key
+*.pem
+*.p12
+*.pfx
+*recovery-export*
+*diagnostic-bundle*
+/work/
+*.auth.json
+*.auth.json.*
+/backups/
+/exports/
+/diagnostics/
+!auth.json.example
+!*.credentials.example.json
