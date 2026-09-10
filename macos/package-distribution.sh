@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Sign a separate candidate. Never install, launch, or disable preview guards.
+# Sign a separate candidate in the requested build mode. Never install or launch.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${SWITCHBOARD_SIGNING_IDENTITY:?Set the existing Developer ID Application identity name or SHA-1.}"
 cd "$REPO"
-./macos/bundle.sh
+[[ -z "$(git status --porcelain --untracked-files=normal)" ]] || {
+  echo "Commit source changes before packaging so the signed candidate identifies exact source." >&2; exit 1;
+}
+./macos/bundle.sh "$@"
 mkdir -p "$REPO/dist/distribution"
 PACKAGE_DIR="$(mktemp -d "$REPO/dist/distribution/package.XXXXXX")"
+git rev-parse HEAD > "$PACKAGE_DIR/source-commit.txt"
 APP="$PACKAGE_DIR/Switchboard.app"
 /usr/bin/ditto "$REPO/dist/Switchboard.app" "$APP"
 IDENTIFIER="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Contents/Info.plist")"

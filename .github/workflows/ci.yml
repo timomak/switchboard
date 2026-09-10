@@ -25,5 +25,6 @@ jobs:
           cargo test --locked --lib codex_account::
           cargo test --locked --lib codex_provider::
           cargo test --locked --lib claude_connection::
+          cargo test --locked --lib claude_desktop::capture::
       - run: ./macos/run-tests.sh
       - run: ./macos/bundle.sh

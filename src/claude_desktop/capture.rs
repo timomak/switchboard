@@ -92,11 +92,35 @@ pub fn capture_profile(
     wait: WaitOpts,
     notes: &mut Vec<String>,
 ) -> Result<CaptureOutcome> {
+    capture_profile_checked(
+        paths,
+        label,
+        email,
+        app,
+        wait,
+        notes,
+        crate::claude_connection::ensure_desktop_ready,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_profile_checked(
+    paths: &Paths,
+    label: &str,
+    email: Option<&str>,
+    app: &dyn AppControl,
+    wait: WaitOpts,
+    notes: &mut Vec<String>,
+    admission: impl FnOnce() -> Result<()>,
+) -> Result<CaptureOutcome> {
     crate::config::validate_account_label(label)?;
     install_cancel_handler()?;
     CAPTURE_CANCELLED.store(false, Ordering::SeqCst);
     let _lock =
         crate::cache::acquire_lock(&paths.account_switch_lock(), super::ACCOUNT_LOCK_TIMEOUT)?;
+    // Selection/recovery hold this same account lock while writing their journal.
+    // Check inside the lock, before quitting or touching the login backup.
+    admission()?;
     let profiles = super::load_profiles(&paths.profiles_dir);
     if profiles.iter().any(|profile| profile.label == label) {
         return Err(AppError::Credentials(format!(
@@ -437,6 +461,49 @@ mod tests {
     fn write(path: &Path, contents: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, contents).unwrap();
+    }
+
+    // Tests never resolve the real connection home.
+    fn capture_profile(
+        paths: &Paths,
+        label: &str,
+        email: Option<&str>,
+        app: &dyn AppControl,
+        wait: WaitOpts,
+        notes: &mut Vec<String>,
+    ) -> Result<CaptureOutcome> {
+        capture_profile_checked(paths, label, email, app, wait, notes, || Ok(()))
+    }
+
+    #[test]
+    fn pending_connection_blocks_capture_before_quit_or_backup() {
+        let (root, paths) = fixture();
+        let connections = root.path().join("connections");
+        std::fs::create_dir(&connections).unwrap();
+        let journal = connections.join("desktop-pending.json");
+        write(&journal, "interrupted-fixture");
+        let before = std::fs::read(paths.config_json()).unwrap();
+        let app = Recorder::default();
+        for _ in 0..2 {
+            let err = capture_profile_checked(
+                &paths,
+                "work",
+                None,
+                &app,
+                WaitOpts::default(),
+                &mut Vec::new(),
+                || crate::claude_connection::ensure_ready(&connections),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("claude-recover"));
+        }
+        assert!(app.steps().is_empty());
+        assert_eq!(std::fs::read(paths.config_json()).unwrap(), before);
+        assert!(!paths.prelogin_dir().exists());
+        assert_eq!(
+            std::fs::read_to_string(journal).unwrap(),
+            "interrupted-fixture"
+        );
     }
 
     fn fixture() -> (tempfile::TempDir, Paths) {

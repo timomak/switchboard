@@ -3,6 +3,13 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
+MODE="${1:---switching-enabled}"
+case "$MODE" in
+  --switching-enabled) PREVIEW=false; SUFFIX="" ;;
+  --preview) PREVIEW=true; SUFFIX="-preview" ;;
+  *) echo "Usage: $0 [--switching-enabled|--preview]" >&2; exit 2 ;;
+esac
+[[ $# -le 1 ]] || { echo "Pass exactly one build mode." >&2; exit 2; }
 cargo build --release --locked --bins
 SWITCHBOARD_BUILD_OUTPUT="$REPO/dist/build/ai-usagebar-menubar" ./macos/build.sh
 APP="$REPO/dist/Switchboard.app"
@@ -23,7 +30,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>ai-usagebar-menubar</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.12.0</string>
-<key>CFBundleVersion</key><string>17</string>
+<key>CFBundleVersion</key><string>18</string>
 <key>CFBundleDevelopmentRegion</key><string>en</string>
 <key>CFBundleIconFile</key><string>Switchboard</string>
 <key>SwitchboardPreview</key><true/>
@@ -31,8 +38,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>NSAppleEventsUsageDescription</key><string>Restart the selected desktop app when you switch accounts.</string>
 </dict></plist>
 PLIST
+/usr/bin/plutil -replace SwitchboardPreview -bool "$PREVIEW" "$APP/Contents/Info.plist"
+/usr/bin/plutil -insert SwitchboardSourceCommit -string "$(git rev-parse HEAD)" "$APP/Contents/Info.plist"
 /usr/bin/plutil -lint "$APP/Contents/Info.plist"
 /usr/bin/codesign --force --deep --sign - "$APP"
 /usr/bin/codesign --verify --deep --strict "$APP"
-/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$REPO/dist/Switchboard-macOS-$(uname -m).zip"
-printf '\nBuilt: %s\n' "$APP"
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$REPO/dist/Switchboard-macOS-$(uname -m)$SUFFIX.zip"
+printf '\nBuilt (%s): %s\n' "$MODE" "$APP"

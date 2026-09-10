@@ -42,7 +42,9 @@ PY
 /usr/sbin/spctl --assess --type execute --verbose=2 "$APP"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 BUILD="$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$APP/Contents/Info.plist")"
-ARCHIVE="Switchboard-$VERSION-$BUILD-macOS-$(uname -m).zip"
+SUFFIX=""
+if [[ "$(/usr/libexec/PlistBuddy -c 'Print SwitchboardPreview' "$APP/Contents/Info.plist")" == "true" ]]; then SUFFIX="-preview"; fi
+ARCHIVE="Switchboard-$VERSION-$BUILD-macOS-$(uname -m)$SUFFIX.zip"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$PACKAGE_DIR/$ARCHIVE"
 (cd "$PACKAGE_DIR" && /usr/bin/shasum -a 256 "$ARCHIVE" > SHA256SUMS)
 printf 'Notarized archive ready for review: %s/%s\n' "$PACKAGE_DIR" "$ARCHIVE"

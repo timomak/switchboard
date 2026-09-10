@@ -257,7 +257,7 @@ fn select_desktop(
 }
 
 const RECOVERY: &str = "An interrupted Claude connection change needs recovery. Run `ai-usagebar cli claude-recover` before selecting again.";
-fn ensure_ready(r: &Path) -> Result<()> {
+pub(crate) fn ensure_ready(r: &Path) -> Result<()> {
     if r.join("desktop-pending.json").try_exists()? {
         return Err(error(RECOVERY));
     }

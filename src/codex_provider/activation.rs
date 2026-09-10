@@ -226,7 +226,7 @@ fn plan(profile: &Profile, home: &Path, baseline: &Snapshot) -> Result<Snapshot>
         }
         _ => {
             environment.insert(
-                bindings.credential_key.clone(),
+                profile.runtime_key()?,
                 values[&bindings.credential_key].clone(),
             );
         }
@@ -263,16 +263,74 @@ fn plan(profile: &Profile, home: &Path, baseline: &Snapshot) -> Result<Snapshot>
         env: Some(env),
     })
 }
+// Retain only referenced managed definitions and their exact private credential lines.
+// Legacy adapters keep the conservative admission guard; never invent their identity.
+fn retain_referenced(home: &Path, before: &Snapshot, target: &mut Snapshot) -> Result<()> {
+    let old: toml_edit::DocumentMut = before
+        .config
+        .as_deref()
+        .unwrap_or("")
+        .parse()
+        .map_err(|_| error("Codex configuration is invalid."))?;
+    let mut new: toml_edit::DocumentMut = target
+        .config
+        .as_deref()
+        .unwrap_or("")
+        .parse()
+        .map_err(|_| error("Codex configuration is invalid."))?;
+    let mut changed = false;
+    for id in super::compatibility::references(home)? {
+        let Some(key) = managed_key(&id) else {
+            continue;
+        };
+        let Some(definition) = old.get("model_providers").and_then(|v| v.get(&id)) else {
+            continue;
+        };
+        if definition.get("env_key").and_then(|v| v.as_str()) != Some(&key) {
+            return Err(error(
+                "Saved connection credential binding changed; preserve config.toml and use manual recovery.",
+            ));
+        }
+        let line = super::compatibility::credential_line(before.env.as_deref(), &key)?;
+        let existing = new.get("model_providers").and_then(|v| v.get(&id));
+        if existing.is_none() {
+            if new.get("model_providers").is_none() {
+                new["model_providers"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            if !new["model_providers"].is_table() {
+                return Err(error(
+                    "The model_providers configuration must be a TOML table.",
+                ));
+            }
+            new["model_providers"][&id] = definition.clone();
+            changed = true;
+        }
+        // Do not overwrite a proposed key: the compatibility check must detect rebinding.
+        if super::compatibility::optional_credential_line(target.env.as_deref(), &key)?.is_none() {
+            let env = target.env.get_or_insert_default();
+            if !env.is_empty() && !env.ends_with('\n') {
+                env.push('\n');
+            }
+            env.push_str(line);
+            env.push('\n');
+        }
+    }
+    if changed {
+        target.config = Some(new.to_string());
+    }
+    Ok(())
+}
 fn prepare(root: &Path, home: &Path, profile: Option<&Profile>) -> Result<Pending> {
     if pending(root).exists() {
         return Err(error("Recover the interrupted connection change first."));
     }
     let before = snapshot(home)?;
     let previous = active(root)?;
-    let baseline = match &previous {
+    let mut baseline = match &previous {
         Some(a) => reconciled_baseline(a, home, &before)?,
         None => before.clone(),
     };
+    retain_referenced(home, &before, &mut baseline)?;
     let (after, next) = if let Some(profile) = profile {
         let after = plan(profile, home, &baseline)?;
         let next = Active {
@@ -303,7 +361,8 @@ fn ensure_task_compatibility(home: &Path, before: &Snapshot, after: &Snapshot) -
         home,
         before.config.as_deref(),
         after.config.as_deref(),
-        before.env != after.env,
+        before.env.as_deref(),
+        after.env.as_deref(),
     )
 }
 fn commit(root: &Path, p: &Pending) -> Result<()> {
@@ -312,7 +371,13 @@ fn commit(root: &Path, p: &Pending) -> Result<()> {
             "Codex configuration changed while quitting. Nothing was overwritten.",
         ));
     }
-    // Recheck after quit: a task may have been created since prepare().
+    // Reconcile references created during shutdown before journaling the exact write.
+    let mut p = p.clone();
+    retain_referenced(&p.home, &p.before, &mut p.after)?;
+    if let Some(next) = &mut p.next {
+        retain_referenced(&p.home, &p.before, &mut next.baseline)?;
+        next.applied = p.after.clone();
+    }
     ensure_task_compatibility(&p.home, &p.before, &p.after)?;
     private_dir(&runtime(root))?;
     // Retain a private immutable recovery record for each attempted change.
@@ -320,14 +385,21 @@ fn commit(root: &Path, p: &Pending) -> Result<()> {
         "backup-{}.json",
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
     ));
-    persist(&backup, p)?;
-    persist(&pending(root), p)?;
+    persist(&backup, &p)?;
+    persist(&pending(root), &p)?;
     write_snapshot(&p.home, &p.after)?;
     write_active(root, &p.next)?;
     std::fs::remove_file(pending(root))
         .map_err(|_| error("Connection applied; recovery journal could not be cleared."))
 }
 fn recover(root: &Path, home: &Path) -> Result<()> {
+    recover_with(root, home, write_snapshot)
+}
+fn recover_with(
+    root: &Path,
+    home: &Path,
+    write: impl FnOnce(&Path, &Snapshot) -> Result<()>,
+) -> Result<()> {
     let data = read_optional(&pending(root))?
         .ok_or_else(|| error("There is no interrupted connection change."))?;
     let p: Pending =
@@ -343,9 +415,28 @@ fn recover(root: &Path, home: &Path) -> Result<()> {
             "Configuration changed after the interrupted operation. Preserve it and use manual recovery.",
         ));
     }
-    ensure_task_compatibility(home, &actual, &p.before)?;
-    write_snapshot(home, &p.before)?;
-    write_active(root, &p.previous)?;
+    let mut restored = p.before.clone();
+    retain_referenced(home, &actual, &mut restored)?;
+    ensure_task_compatibility(home, &actual, &restored)?;
+    let mut previous = p.previous.clone();
+    if let Some(previous) = &mut previous {
+        retain_referenced(home, &actual, &mut previous.baseline)?;
+        previous.applied = restored.clone();
+    }
+    // Retention can make the rollback differ from the original before image.
+    // Journal that exact target before writing, so another interruption is recoverable.
+    persist(
+        &pending(root),
+        &Pending {
+            home: home.to_path_buf(),
+            before: restored.clone(),
+            after: actual,
+            previous: previous.clone(),
+            next: p.next,
+        },
+    )?;
+    write(home, &restored)?;
+    write_active(root, &previous)?;
     std::fs::remove_file(pending(root))
         .map_err(|_| error("Recovered configuration; journal could not be cleared."))
 }
@@ -446,6 +537,11 @@ pub(super) async fn run(action: &Action) -> Result<()> {
             "Connection change was interrupted. Use Recover connection before reopening Codex.",
         ));
     }
+    if is_recovery && result.is_err() && pending(&root).exists() {
+        return Err(error(
+            "Connection recovery is unresolved. Codex remains closed; preserve outside edits and retry Recover connection after resolving the reported configuration conflict.",
+        ));
+    }
     if result.is_ok()
         && let Some(label) = account
     {
@@ -470,6 +566,188 @@ pub(super) async fn run(action: &Action) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn managed_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, Profile) {
+        let (tmp, home, root, profile) = fixture();
+        stage(&root, &profile).unwrap();
+        let profile = load(&root, &profile.label).unwrap();
+        (tmp, home, root, profile)
+    }
+
+    #[test]
+    fn managed_adapters_return_to_subscription_with_saved_tasks_and_isolated_keys() {
+        for adapter in [Provider::Compatible, Provider::Azure] {
+            let (_tmp, home, root, mut profile) = managed_fixture();
+            profile.provider = adapter;
+            if matches!(adapter, Provider::Azure) {
+                std::fs::write(
+                    &profile.source,
+                    "TEAM_TOKEN=fixture-secret\nTEAM_ENDPOINT=https://fixture.openai.azure.com\n",
+                )
+                .unwrap();
+            }
+            let id = profile.provider_id().unwrap();
+            let key = profile.runtime_key().unwrap();
+            commit(&root, &prepare(&root, &home, Some(&profile)).unwrap()).unwrap();
+            task_fixture(&home, &id, true, true);
+            let rollout = home.join("sessions/2026/09/09/fixture.jsonl");
+            let body = std::fs::read(&rollout).unwrap();
+            let db = std::fs::read(home.join("state_5.sqlite")).unwrap();
+            let definition = read_config(&home).unwrap()["model_providers"][&id].clone();
+            commit(&root, &prepare(&root, &home, None).unwrap()).unwrap();
+            assert_eq!(
+                read_config(&home).unwrap()["model_provider"].as_str(),
+                Some("openai")
+            );
+            assert_eq!(
+                read_config(&home).unwrap()["model_providers"][&id],
+                definition
+            );
+            assert!(status(&root, &home).unwrap()["active_label"].is_null());
+            let retained_env = snapshot(&home).unwrap().env.unwrap();
+            assert!(retained_env.contains(&format!("{key}=\"fixture-secret\"")));
+            assert!(!retained_env.contains("TEAM_TOKEN="));
+            reopen_fixture(&home);
+
+            let mut second = profile.clone();
+            second.label = "second".into();
+            second.source = home.join("second.env");
+            std::fs::write(&second.source, if matches!(adapter, Provider::Azure) {
+                "TEAM_TOKEN=second-fixture-secret\nTEAM_ENDPOINT=https://second.openai.azure.com\n"
+            } else {
+                "TEAM_TOKEN=second-fixture-secret\nTEAM_ENDPOINT=https://second.example/v1\n"
+            }).unwrap();
+            stage(&root, &second).unwrap();
+            let second = load(&root, "second").unwrap();
+            assert_ne!(id, second.provider_id().unwrap());
+            commit(&root, &prepare(&root, &home, Some(&second)).unwrap()).unwrap();
+            let archived = home.join("archived_sessions");
+            std::fs::create_dir(&archived).unwrap();
+            std::fs::write(archived.join("second.jsonl"),
+                format!("{}\n", json!({"type":"session_meta","payload":{"model_provider":second.provider_id().unwrap()}}))).unwrap();
+            commit(&root, &prepare(&root, &home, None).unwrap()).unwrap();
+            let env = snapshot(&home).unwrap().env.unwrap();
+            assert!(env.contains(&key));
+            assert!(env.contains(&second.runtime_key().unwrap()));
+            assert_eq!(
+                read_config(&home).unwrap()["model_providers"][&id],
+                definition
+            );
+            assert_eq!(std::fs::read(rollout).unwrap(), body);
+            assert_eq!(std::fs::read(home.join("state_5.sqlite")).unwrap(), db);
+        }
+    }
+
+    #[test]
+    fn managed_references_created_during_shutdown_are_retained_before_journaling() {
+        for (db, rollout) in [(true, false), (false, true)] {
+            let (_tmp, home, root, profile) = managed_fixture();
+            commit(&root, &prepare(&root, &home, Some(&profile)).unwrap()).unwrap();
+            let back = prepare(&root, &home, None).unwrap();
+            task_fixture(&home, &profile.provider_id().unwrap(), db, rollout);
+            if rollout {
+                std::fs::rename(home.join("sessions"), home.join("archived_sessions")).unwrap();
+            }
+            commit(&root, &back).unwrap();
+            assert_eq!(
+                read_config(&home).unwrap()["model_provider"].as_str(),
+                Some("openai")
+            );
+            assert!(
+                read_config(&home).unwrap()["model_providers"]
+                    .get(profile.provider_id().unwrap())
+                    .is_some()
+            );
+            assert!(!pending(&root).exists());
+        }
+    }
+
+    #[test]
+    fn managed_identity_survives_label_change_but_rebinding_and_missing_keys_are_refused() {
+        let (_tmp, home, root, mut profile) = managed_fixture();
+        commit(&root, &prepare(&root, &home, Some(&profile)).unwrap()).unwrap();
+        task_fixture(&home, &profile.provider_id().unwrap(), true, true);
+        profile.label = "renamed".into();
+        commit(&root, &prepare(&root, &home, Some(&profile)).unwrap()).unwrap();
+        let before = snapshot(&home).unwrap();
+        for source in [
+            "TEAM_TOKEN=changed-account\nTEAM_ENDPOINT=https://fixture.example/v1\n",
+            "TEAM_TOKEN=fixture-secret\nTEAM_ENDPOINT=https://changed.example/v1\n",
+        ] {
+            std::fs::write(&profile.source, source).unwrap();
+            assert!(prepare(&root, &home, Some(&profile)).is_err());
+            assert!(snapshot(&home).unwrap() == before);
+        }
+        std::fs::remove_file(&profile.source).unwrap();
+        // Subscription return uses the retained runtime credential, not the missing source.
+        commit(&root, &prepare(&root, &home, None).unwrap()).unwrap();
+        let before = snapshot(&home).unwrap();
+        let mut missing = before.clone();
+        missing.env = None;
+        assert!(ensure_task_compatibility(&home, &before, &missing).is_err());
+        assert!(retain_referenced(&home, &missing, &mut before.clone()).is_err());
+    }
+
+    #[test]
+    fn managed_recovery_retains_saved_dependencies_and_is_repeatable_without_writes() {
+        let (_tmp, home, root, profile) = managed_fixture();
+        let change = prepare(&root, &home, Some(&profile)).unwrap();
+        commit(&root, &change).unwrap();
+        task_fixture(&home, &profile.provider_id().unwrap(), true, true);
+        persist(&pending(&root), &change).unwrap();
+        recover(&root, &home).unwrap();
+        assert_eq!(
+            read_config(&home).unwrap()["model_provider"].as_str(),
+            Some("openai")
+        );
+        reopen_fixture(&home);
+        let before = snapshot(&home).unwrap();
+        assert!(recover(&root, &home).is_err());
+        assert!(snapshot(&home).unwrap() == before);
+    }
+
+    #[test]
+    fn managed_recovery_interrupted_after_config_write_can_retry() {
+        let (_tmp, home, root, profile) = managed_fixture();
+        let change = prepare(&root, &home, Some(&profile)).unwrap();
+        commit(&root, &change).unwrap();
+        task_fixture(&home, &profile.provider_id().unwrap(), true, true);
+        persist(&pending(&root), &change).unwrap();
+        assert!(
+            recover_with(&root, &home, |home, state| {
+                write_optional(&home.join("config.toml"), &state.config)?;
+                Err(error("fixture interrupted write"))
+            })
+            .is_err()
+        );
+        assert!(pending(&root).exists());
+        recover(&root, &home).unwrap();
+        reopen_fixture(&home);
+        assert_eq!(
+            read_config(&home).unwrap()["model_provider"].as_str(),
+            Some("openai")
+        );
+        assert!(!pending(&root).exists());
+    }
+
+    #[test]
+    fn bedrock_saved_tasks_still_guard_the_shared_aws_environment() {
+        let (_tmp, home, root, mut profile) = fixture();
+        profile.provider = Provider::Bedrock;
+        profile.bindings = None;
+        std::fs::write(
+            &profile.source,
+            "AWS_BEARER_TOKEN_BEDROCK=synthetic-aws\nAWS_REGION=us-east-1\n",
+        )
+        .unwrap();
+        stage(&root, &profile).unwrap();
+        let profile = load(&root, &profile.label).unwrap();
+        assert!(profile.routing_id.is_none());
+        commit(&root, &prepare(&root, &home, Some(&profile)).unwrap()).unwrap();
+        task_fixture(&home, "amazon-bedrock", true, true);
+        let before = snapshot(&home).unwrap();
+        assert!(prepare(&root, &home, None).is_err());
+        assert!(snapshot(&home).unwrap() == before);
+    }
     #[test]
     fn plugin_updates_preserve_selection_and_survive_return() {
         let (_tmp, home, root, profile) = fixture();
@@ -553,6 +831,7 @@ mod tests {
         )
         .unwrap();
         let profile = Profile {
+            routing_id: None,
             label: "team".into(),
             provider: Provider::Compatible,
             source,

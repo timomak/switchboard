@@ -409,7 +409,7 @@ extension AppDelegate {
         button.imagePosition = compact ? .imageOnly : .imageLeading
         button.imageScaling = .scaleProportionallyDown
         button.attributedTitle = NSAttributedString(string: compact ? "" : "  Switchboard")
-        button.toolTip = "Switchboard preview · Claude and Codex accounts"
+        button.toolTip = SWITCHBOARD_PREVIEW ? "Switchboard preview · Claude and Codex accounts" : "Switchboard · Claude and Codex accounts"
     }
 
     func refreshSwitchboard() {

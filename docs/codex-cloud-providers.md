@@ -56,11 +56,12 @@ ai-usagebar codex-provider recover --yes
 Selection updates only `config.toml` and `.env` in the existing CODEX_HOME.
 It reads the selected source fields on demand and writes the necessary runtime
 environment fields privately for the official app. It never passes credentials
-as command arguments or prints them. Azure/custom connections bind their named
-API-key variable; Bedrock mappings become the AWS runtime token and region.
+as command arguments or prints them. New Azure/custom connections bind a distinct opaque runtime
+API-key variable per identity; Bedrock mappings become the AWS runtime token and region.
 It preserves unrelated config and removes first-party login/effort/service-tier
 overrides while the provider is selected. Selecting a saved subscription restores the
-original connection configuration and environment, including whether `.env` existed.
+original defaults and environment, retaining managed provider definitions and keys
+needed by saved tasks. Without such references it also restores whether `.env` existed.
 Unrelated settings changed by Codex while connected, such as plugin settings, are retained.
 The source file is never edited and the OAuth auth file is never replaced.
 
@@ -134,4 +135,12 @@ must finish before changing selection; Claude Desktop and Codex are unaffected.
 
 ## Saved tasks bind to provider identities
 
-A task created under a configured provider can continue to reference that provider after the default changes. Connection use, subscription return and recovery now refuse to remove/rebind definitions referenced by the current home's task DBs or rollouts, or to change their runtime credential environment. This prevents missing-provider errors and reuse of `custom` for a different endpoint. It can deliberately block subscription return after a provider task has been created. No task metadata is automatically migrated. See the [compatibility policy and future stable-identity design](codex-task-provider-compatibility.md).
+A task created under a configured provider can continue to reference it after the
+default changes. New Compatible and Azure connections use persisted routing IDs
+and separate runtime keys; referenced definitions and keys survive subscription
+return and A → B. Retained credentials have no automatic expiry and can still be
+used by historical tasks until revoked or retired. Changing a referenced
+endpoint/key is refused; register a new connection for future tasks. Legacy
+`custom`/`azure` and Bedrock's shared AWS environment keep their conservative
+guards, which can still block subscription return. See the
+[compatibility and credential-lifetime policy](codex-task-provider-compatibility.md).
