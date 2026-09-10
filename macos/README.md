@@ -1,17 +1,8 @@
-# AI Usage Bar — macOS menu bar app
+# Switchboard for macOS
 
-A native macOS menu bar app for [`ai-usagebar`](../README.md). It shows the
-**5-hour (session)** and **weekly** usage bars — plus an optional
-dynamic **model-scoped** bar (for example, Fable) and **extra-usage (cost)**
-bar — in the menu bar next to the clock, with a native dropdown. For most
-vendors there are no usage windows to chart, so showing their **balance/credits**
-is the primary display mode (see [Vendor scope](#vendor-scope)). It's the macOS counterpart to the [GNOME Shell
-extension](https://github.com/akitaonrails/ai-usagebar/tree/main/gnome-extension): same binary, same One Dark colors and
-severity thresholds.
-
-A single Swift file (`NSStatusItem` + `NSAttributedString`); no Xcode project.
-
-> **Installing?** Follow the step-by-step in **[INSTALL.md](INSTALL.md)**.
+Switchboard provides account selectors, usage indicators, and conversation
+cloning from the macOS menu bar. Follow [INSTALL.md](INSTALL.md) to install
+an official release or build locally.
 
 ## Vendor scope
 
@@ -43,16 +34,16 @@ time, so one of those must be running for quota to load.
 ## Requirements
 
 - macOS with the **Command Line Tools** (`xcode-select --install`) for `swiftc`.
-- The Rust backend from this fork. `./macos/bundle.sh` builds both parts; see
+- The bundled Switchboard backend. `./macos/bundle.sh` builds both parts; see
   [INSTALL.md](INSTALL.md). The crates.io release does not include this port.
 - Run `claude` once on the Mac so its OAuth creds are in the login **Keychain**;
-  ai-usagebar reads them there automatically (no env vars).
+  Switchboard reads them there automatically (no env vars).
 
 ## Build & run
 
 Recommended: run `./macos/bundle.sh` from the repository root, then open
-`dist/AI Usage Bar.app`. The commands below build only the Swift frontend and
-require configuring its binary path to this fork’s backend.
+`dist/Switchboard.app`. The commands below build only the Swift frontend and
+require configuring its binary path to the Switchboard backend.
 
 ```bash
 cd macos
@@ -68,9 +59,8 @@ app, or from the shell:
 ./install-agent.sh         # installs a LaunchAgent (RunAtLoad)
 ```
 
-> Not code-signed. It's a local binary you built yourself, so Gatekeeper
-> doesn't block it when launched from the terminal / LaunchAgent. If macOS ever
-> complains, right-click the binary in Finder → **Open** once.
+Official release archives are signed and notarized. Local bundle builds are
+ad-hoc signed. See [distribution](../docs/macos-distribution.md) for packaging.
 
 ## Configuration
 
@@ -164,7 +154,7 @@ replaces only its login file. Chats, projects and routines remain in the same
 Codex home. Both desktop selectors disable while an operation runs.
 
 See [the desktop profile guide](../docs/codex-desktop-profiles.md) for setup,
-recovery, limitations, CLI commands and the two-codebase analysis.
+recovery, limitations, and CLI commands.
 
 ## Multiple OpenRouter accounts
 

@@ -8,7 +8,7 @@ Claude and Codex accounts, within reach. Switchboard is a native macOS menu bar 
 - Select Desktop and CLI identities separately, or share the Codex Desktop login with CLI.
 - See Claude five-hour and weekly usage and Codex weekly usage.
 - Manage saved accounts and API connections from Settings.
-- [Continue a conversation in another app](docs/continue-in-another-app.md) using a reviewed local handoff.
+- [Continue a conversation in another app](docs/continue-in-another-app.md) by cloning supported local chat histories into independent native sessions.
 
 Switchboard is independent of Anthropic and OpenAI.
 
@@ -56,8 +56,8 @@ cargo test --locked --lib claude_desktop::capture::
 
 With Gitleaks 8.28.0 installed, run `./scripts/scan-secrets.sh` and `./scripts/scan-secrets.sh --history`. CI checks source and history with redacted output.
 
-## Credits and license
+## License
 
-Switchboard is derived from [AI Usage Bar](https://github.com/akitaonrails/ai-usagebar) and retains its [MIT license](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md) for upstream attribution, including Codex Account Switcher for Mac. Provider marks belong to their respective owners.
+Original contributions use the [Switchboard Permissive License 1.0](LICENSE). Incorporated components retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md). Provider marks belong to their respective owners.
 
 The `ai-usagebar` executable names and existing storage paths are retained for compatibility. Inherited Linux frontends remain in the source tree; this repository does not automatically publish their packages.

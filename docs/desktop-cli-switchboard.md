@@ -88,4 +88,4 @@ accounts. Compile it together with the two app Swift files and
 `-D SWIFT_TEST_HARNESS`, then supply an output PNG path and optionally `--dark`
 or `--separate`; `--short-screen` exercises a 450-point-high display. The harness never polls accounts or reads credentials.
 
-Building does not install or launch the app. The preview uses `io.github.timomak.switchboard` and leaves the installed AI Usage Bar app and its preferences alone. Any replacement and preference migration requires separate approval; existing profile paths and credential-helper references must remain compatible.
+Building does not install or launch the app. The bundle uses `io.github.timomak.switchboard`. Follow the [installation guide](../macos/INSTALL.md) to replace an installed copy. Existing profile paths and credential-helper references remain compatible.
