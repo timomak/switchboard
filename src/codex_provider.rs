@@ -512,8 +512,13 @@ fn verify(profile: &Profile, home: &Path) -> Result<Value> {
             proposal.insert("model_providers".into(), provider);
         }
         Provider::Compatible => {
+            let name = if profile.routing_id.is_some() {
+                "Switchboard connection"
+            } else {
+                &profile.label
+            };
             proposal.insert("model_provider".into(), provider_id.clone().into());
-            let provider: toml::Value=serde_json::from_value(json!({(provider_id):{"name":"Switchboard connection","base_url":values[bindings.endpoint_key.as_deref().ok_or_else(|| error("Endpoint mapping missing."))?],"env_key":runtime_key,"wire_api":"responses"}})).map_err(|_| error("Could not prepare custom provider config."))?;
+            let provider: toml::Value=serde_json::from_value(json!({(provider_id):{"name":name,"base_url":values[bindings.endpoint_key.as_deref().ok_or_else(|| error("Endpoint mapping missing."))?],"env_key":runtime_key,"wire_api":"responses"}})).map_err(|_| error("Could not prepare custom provider config."))?;
             proposal.insert("model_providers".into(), provider);
         }
     }
@@ -715,6 +720,12 @@ mod tests {
         };
         let result = verify(&profile, &tmp.path().join("home")).unwrap();
         assert_eq!(result["configured_model"], "future-org-model");
+        let proposal: toml::Value =
+            toml::from_str(result["proposed_config"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            proposal["model_providers"]["custom"]["name"].as_str(),
+            Some("Team gateway")
+        );
         assert!(result.get("catalog_models").is_none());
         assert_eq!(result["model_access"], "not-checked");
         assert!(!result.to_string().contains("fixture-secret"));
