@@ -41,6 +41,9 @@ PLIST
 /usr/bin/plutil -replace SwitchboardPreview -bool "$PREVIEW" "$APP/Contents/Info.plist"
 /usr/bin/plutil -insert SwitchboardSourceCommit -string "$(git rev-parse HEAD)" "$APP/Contents/Info.plist"
 /usr/bin/plutil -lint "$APP/Contents/Info.plist"
+# Repeated local builds may inherit Finder/resource-fork metadata. Normalize
+# only this generated bundle before signing; never touch source or installed apps.
+/usr/bin/xattr -cr "$APP"
 /usr/bin/codesign --force --deep --sign - "$APP"
 /usr/bin/codesign --verify --deep --strict "$APP"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$REPO/dist/Switchboard-macOS-$(uname -m)$SUFFIX.zip"
