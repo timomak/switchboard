@@ -8,11 +8,13 @@ cd "$REPO"
   echo "Commit source changes before packaging so the signed candidate identifies exact source." >&2; exit 1;
 }
 ./macos/bundle.sh "$@"
-mkdir -p "$REPO/dist/distribution"
-PACKAGE_DIR="$(mktemp -d "$REPO/dist/distribution/package.XXXXXX")"
+PACKAGE_ROOT="${SWITCHBOARD_DISTRIBUTION_ROOT:-$REPO/dist/distribution}"
+mkdir -p "$PACKAGE_ROOT"
+PACKAGE_DIR="$(mktemp -d "$PACKAGE_ROOT/package.XXXXXX")"
 git rev-parse HEAD > "$PACKAGE_DIR/source-commit.txt"
 APP="$PACKAGE_DIR/Switchboard.app"
 /usr/bin/ditto "$REPO/dist/Switchboard.app" "$APP"
+/usr/bin/xattr -cr "$APP"
 IDENTIFIER="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Contents/Info.plist")"
 for binary in ai-usagebar ai-usagebar-tui; do
   /usr/bin/codesign --force --sign "$SWITCHBOARD_SIGNING_IDENTITY" --timestamp --options runtime \

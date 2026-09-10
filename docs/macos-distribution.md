@@ -12,6 +12,10 @@ SWITCHBOARD_SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' ./ma
 
 Commit source changes first. The script records the source commit in the bundle and package directory, builds the requested mode, signs the two bundled executables and app explicitly from the inside out with secure timestamps and hardened runtime, and verifies their signatures. It retains existing executable/helper paths. The sole entitlement is Apple Events automation for the existing desktop-app control behavior. This is not a sandbox entitlement or permission to access every app. macOS may ask for Automation permission when you first restart a desktop app.
 
+For a synced source checkout, set `SWITCHBOARD_DISTRIBUTION_ROOT` to a local,
+non-synced staging directory. This avoids cloud-file metadata being added to the
+signed candidate while notarization is processing.
+
 Each invocation produces a separate `package.*` directory containing the signed app, `submission.zip`, and exact app/archive hash manifests. A signed candidate is not yet notarized or ready for a general download. Never publish this directory wholesale.
 
 ## Configure authentication once
