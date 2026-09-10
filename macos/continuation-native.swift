@@ -32,7 +32,10 @@ enum ContinuationDesktopHandoff {
     static func run(script: String, directory: URL, timeout: TimeInterval = 45) throws {
         try Task.checkCancellation()
         let file = directory.appendingPathComponent(".open-desktop-\(UUID()).sh")
-        try ContinuationFiles.write(Data(script.utf8), to: file)
+        // A PTY started from a GUI inherits a 0×0 window. Give terminal UI
+        // libraries usable dimensions before Claude starts rendering.
+        let sizedScript = "/bin/stty cols 120 rows 40 || exit 125\n" + script
+        try ContinuationFiles.write(Data(sizedScript.utf8), to: file)
         defer { try? FileManager.default.removeItem(at: file) }
         let process = Process(), input = Pipe(), output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/script")

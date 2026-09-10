@@ -12,7 +12,7 @@ struct ContinuationNativeTests {
         let root = keep.map { URL(fileURLWithPath: $0) } ?? FileManager.default.temporaryDirectory.appendingPathComponent("switchboard-native-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { if keep == nil { try? FileManager.default.removeItem(at: root) } }
-        try ContinuationDesktopHandoff.run(script: "#!/bin/bash\nset -e\n[[ -t 0 && -t 1 && -t 2 ]]\n/usr/bin/yes synthetic | /usr/bin/head -c 300000\n", directory: root)
+        try ContinuationDesktopHandoff.run(script: "#!/bin/bash\nset -e\n[[ -t 0 && -t 1 && -t 2 ]]\n[[ $(/bin/stty size) == '40 120' ]]\n/usr/bin/yes synthetic | /usr/bin/head -c 300000\n", directory: root)
         check(true, "hidden handoff provides a real terminal and drains large output")
         do { try ContinuationDesktopHandoff.run(script: "exit 37\n", directory: root); fatalError("Must propagate CLI failure") }
         catch ContinuationHandoffError.failed { check(true, "nonzero handoff status becomes an actionable error") }
