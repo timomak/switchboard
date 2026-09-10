@@ -170,7 +170,11 @@ enum ContinuationDiscovery {
             }
             chat = try .make(surface: entry.chat.surface, title: entry.chat.title, messages: messages, omissions: omissions)
         }
-        chat.id = entry.chat.id; chat.title = entry.chat.title; chat.importedAt = entry.chat.importedAt
+        chat.id = entry.chat.id
+        // Claude's full transcript can contain a later custom title absent from
+        // the catalog prefix. Codex's catalog remains its authoritative name.
+        if chat.surface != .claudeCode { chat.title = entry.chat.title }
+        chat.importedAt = entry.chat.importedAt
         return chat
     }
 }

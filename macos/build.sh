@@ -13,7 +13,7 @@ OUTPUT="${SWITCHBOARD_BUILD_OUTPUT:-$DIR/ai-usagebar-menubar}"
 mkdir -p "$(dirname "$OUTPUT")"
 
 echo "› Building (swiftc -O -parse-as-library)…"
-swiftc -O -parse-as-library "$DIR/ai-usagebar-menubar.swift" "$DIR/account-switchboard.swift" "$DIR/continuation-core.swift" "$DIR/continuation-native.swift" "$DIR/continuation-discovery.swift" "$DIR/continuation-ui.swift" "$DIR/continuation-claude.swift" -o "$OUTPUT"
+swiftc -O -parse-as-library "$DIR/ai-usagebar-menubar.swift" "$DIR/account-switchboard.swift" "$DIR/continuation-core.swift" "$DIR/continuation-native.swift" "$DIR/continuation-discovery.swift" "$DIR/continuation-ui.swift" "$DIR/continuation-project.swift" "$DIR/continuation-project-ui.swift" "$DIR/continuation-claude.swift" -o "$OUTPUT"
 echo "✓ Built: $OUTPUT"
 echo
 echo "Run now:        $OUTPUT &"
