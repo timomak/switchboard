@@ -230,7 +230,7 @@ final class ContinuationModel: ObservableObject {
         copied = NSPasteboard.general.setString(bundle.context, forType: .string)
         if !copied { message = "Could not copy. Try again." }
     }
-    func openDestination(openCLI: (String, String?) -> Void) {
+    func openDestination(openCLI: (String, String?) -> Void, onOpened: (() -> Void)? = nil) {
         guard !busy else { return }
         if simulateExternalActions { message = "Fixture: destination opening not executed."; return }
         guard let bundle else { return }
@@ -251,6 +251,7 @@ final class ContinuationModel: ObservableObject {
                             try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
                             guard let self, self.generation == token, !Task.isCancelled else { return }
                             self.openedClaude = true
+                            onOpened?()
                         } catch {
                             guard let self, self.generation == token, !Task.isCancelled else { return }
                             self.message = (error as? LocalizedError)?.errorDescription ?? ContinuationHandoffError.failed.errorDescription

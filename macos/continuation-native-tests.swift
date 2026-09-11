@@ -30,6 +30,25 @@ struct ContinuationNativeTests {
         catch is CancellationError { check(true, "cancellation shuts down the hidden handoff") }
         let remnants = try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasPrefix(".open-desktop-") }
         check(remnants.isEmpty, "success, failure and cancellation remove temporary launch scripts")
+        do {
+            try ContinuationDesktopHandoff.run(script: "echo 'Do you trust this folder?'\nsleep 5\n", directory: root, interactive: false)
+            fatalError("Trust prompt must surface")
+        } catch ContinuationHandoffError.trustRequired { check(true, "hidden trust prompt surfaces without waiting for timeout") }
+        check(ContinuationDesktopHandoff.promptError("Please log in") != nil, "sign-in prompt is actionable")
+        check(ContinuationDesktopHandoff.promptError("Quick safety check: Is this a project you created\n or one you trust?") != nil, "Installed CLI trust wording detected across wrapped lines")
+        check(ContinuationDesktopHandoff.promptError("Choose the text style that looks best with your terminal") != nil, "Hidden first-run setup is actionable")
+        check(ContinuationDesktopHandoff.promptError("Quicksafetycheck:Isthisaprojectyoucreatedoroneyoutrust?") != nil, "cursor-positioned trust prompt detected without spaces")
+        try ContinuationDesktopHandoff.runInteractive(script: "exit 0", directory: root, launch: { command in
+            let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/bash"); process.arguments = ["-c", command]
+            try process.run(); process.waitUntilExit()
+        })
+        check(true, "interactive handoff waits for a successful saved-session exit")
+        do {
+            try ContinuationDesktopHandoff.runInteractive(script: "exit 9", directory: root, launch: { command in
+                let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/bash"); process.arguments = ["-c", command]
+                try process.run(); process.waitUntilExit()
+            }); fatalError("Must reject failed interactive launch")
+        } catch ContinuationHandoffError.failed { check(true, "interactive failure never marks the chat ready") }
         let project = root.appendingPathComponent("project space ' é"); try ContinuationFiles.directory(project)
         let source = root.appendingPathComponent("source.json")
         let messages = (0..<40).map { ContinuationMessage(role: $0 % 2 == 0 ? "User" : "Assistant",
@@ -55,6 +74,21 @@ struct ContinuationNativeTests {
             previous = row["uuid"] as? String
         }
         check(linked, "Claude parent chain is continuous across the full history")
+        let alias = root.appendingPathComponent("workspace-alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: project)
+        var aliasDraft = draft; aliasDraft.workspace = alias
+        let aliasBundle = try store.prepare(aliasDraft, id: UUID())
+        let aliasResult = try ContinuationNative.create(aliasDraft, bundle: aliasBundle, rootOverride: claudeRoot, binaryOverride: URL(fileURLWithPath: "/usr/bin/true"))
+        check(aliasResult.workspace == project.resolvingSymlinksInPath(), "new Claude clones index the physical workspace behind a symlink")
+        var legacy = aliasResult; legacy.id = UUID().uuidString.lowercased(); legacy.workspace = alias
+        legacy.transcript = root.appendingPathComponent("legacy.jsonl")
+        try ContinuationFiles.write(ContinuationNative.claudeTranscript(messages, id: legacy.id, cwd: alias, title: "Synthetic legacy clone", date: Date()), to: legacy.transcript!)
+        let repaired = try ContinuationNative.repairClaudeWorkspace(legacy)
+        check(repaired.id == legacy.id && repaired.workspace == project.resolvingSymlinksInPath(), "legacy workspace repair preserves the saved chat ID")
+        try ContinuationNative.verify(repaired, expected: messages)
+        let repairedBytes = try Data(contentsOf: repaired.transcript!)
+        _ = try ContinuationNative.repairClaudeWorkspace(legacy)
+        check(try Data(contentsOf: repaired.transcript!) == repairedBytes, "repeated workspace repair preserves the existing canonical transcript")
         let secondBundle = try store.prepare(draft, id: UUID())
         let second = try ContinuationNative.create(draft, bundle: secondBundle, rootOverride: claudeRoot, binaryOverride: URL(fileURLWithPath: "/usr/bin/true"))
         check(second.id != result.id, "a new clone request gets an independent session ID")

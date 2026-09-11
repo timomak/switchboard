@@ -175,6 +175,13 @@ struct ContinuationTests {
         check(configured.count == 1, "custom Claude config directory is honored")
         check(tryValue { try ContinuationDiscovery.catalog(surface: .codexDesktop, home: root, environment: ["CODEX_HOME": codex.path]).count } == 1, "custom Codex home is honored")
         check(tryValue { try ContinuationDiscovery.catalog(surface: .claudeChat, home: home, environment: [:]).isEmpty } == true, "cloud Claude Chat is not mislabeled as local Code history")
+        try database(state, "ALTER TABLE threads ADD COLUMN archived INTEGER DEFAULT 0; UPDATE threads SET archived=1 WHERE id='desktop';")
+        let metadata: [String: Any] = ["local-projects": ["fixture-project": ["name": "Fixture project", "rootPaths": ["/fixture/root"]]],
+            "thread-project-assignments": ["desktop": ["projectKind": "local", "projectId": "fixture-project"]], "projectless-thread-ids": []]
+        try JSONSerialization.data(withJSONObject: metadata).write(to: codex.appendingPathComponent(".codex-global-state.json"))
+        let withMetadata = try ContinuationDiscovery.catalog(surface: .codexDesktop, home: home, environment: [:])
+        check(withMetadata[0].archived && withMetadata[0].projectID == "fixture-project" && withMetadata[0].projectWorkspace?.path == "/fixture/root", "Read-only discovery carries archive status and explicit app membership")
+
     }
     static func tryValue<T>(_ body: () throws -> T) -> T? { try? body() }
 }

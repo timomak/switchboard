@@ -761,7 +761,14 @@ func testDesktopAccounts() {
 
 @main
 struct TestRunner {
-    static func main() {
+    @MainActor static func main() {
+        let projectModel = ProjectCloneModel()
+        projectModel.page = 3; projectModel.message = "Stopped"
+        projectModel.returnToProjects()
+        assertEqual(projectModel.page, 1, "Back from stopped results returns to project selection")
+        assertEqual(projectModel.message, nil, "Returning to step one clears old failure status")
+        projectModel.page = 2; projectModel.returnToProjects()
+        assertEqual(projectModel.page, 1, "Back from review returns to project selection")
         testRingArc()
         testTomlParsing()
         testDefaultEnabled()

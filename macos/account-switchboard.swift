@@ -125,6 +125,7 @@ func boardViewport(visibleFrame: NSRect) -> NSSize {
 struct AccountSwitchboard: View {
     @ObservedObject var model: SwitchboardModel
     @StateObject private var continuation = ContinuationModel()
+    @StateObject private var projectClone = ProjectCloneModel()
     @State private var page = "accounts"
     @State private var contentHeight: CGFloat = 600
     @AppStorage("boardWeekly") private var weekly = true
@@ -138,6 +139,16 @@ struct AccountSwitchboard: View {
                 .frame(width: model.viewport.width)
                 .onAppear {
                     continuation.protectPopover = model.protectPopover
+                    let height = min(440, model.viewport.height)
+                    model.measuredHeight = height
+                    model.resize(NSSize(width: model.viewport.width, height: height))
+                }
+        } else if page == "clone-project" {
+            ProjectCloneView(model: projectClone, height: model.viewport.height,
+                close: { page = "accounts" }, openCLI: { model.action(.openContinuationCLI($0, $1)) })
+                .frame(width: model.viewport.width)
+                .onAppear {
+                    projectClone.protectPopover = model.protectPopover
                     let height = min(440, model.viewport.height)
                     model.measuredHeight = height
                     model.resize(NSSize(width: model.viewport.width, height: height))
@@ -164,6 +175,11 @@ struct AccountSwitchboard: View {
                 Divider()
                 Button { page = "continue" } label: {
                     Label("Continue in another app…", systemImage: "arrow.left.arrow.right")
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 12)
+                }.buttonStyle(.plain).foregroundStyle(Color.accentColor)
+                    .disabled(model.busy || SWITCHBOARD_PREVIEW)
+                Button { page = "clone-project" } label: {
+                    Label("Clone project…", systemImage: "square.on.square")
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 12)
                 }.buttonStyle(.plain).foregroundStyle(Color.accentColor)
                     .disabled(model.busy || SWITCHBOARD_PREVIEW)
