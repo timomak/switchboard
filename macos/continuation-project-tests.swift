@@ -109,6 +109,18 @@ struct ProjectCloneTests {
         let sharedResult = try ProjectCloneEngine.run(shared, store: store, create: creator)
         check(sharedResult.items.allSatisfy { $0.result?.workspace == source }, "Every copied chat uses the same original source folder")
         check(try Data(contentsOf: source.appendingPathComponent("readme.txt")) == sourceBefore, "Shared-folder preparation leaves working files unchanged")
+        var queued = recovered
+        queued.items[0].desktopHandoff = nil
+        var second = queued.items[0]
+        second = ProjectCloneItem(id: UUID(), title: second.title, chat: second.chat, result: second.result)
+        queued.items.append(second)
+        try ProjectCloneEngine.save(queued, store: store)
+        var attempts = 0, progressStates: [String] = []
+        let blocked = try ProjectCloneEngine.handoff(queued, store: store, backend: "/fixture/backend", progress: { batch in
+            progressStates.append(batch.items[0].desktopHandoff ?? "pending")
+        }, openChat: { _, _ in attempts += 1; throw ContinuationHandoffError.timedOut })
+        check(attempts == 1 && blocked.items[1].desktopHandoff == nil, "First handoff failure stops the batch instead of timing out every chat")
+        check(progressStates == ["opening", "needs-attention"], "Opening and failure progress are emitted immediately")
         print("✓ \(checks) project clone checks passed; isolated synthetic stores only.")
     }
 }

@@ -35,6 +35,8 @@ struct ContinuationNativeTests {
             fatalError("Trust prompt must surface")
         } catch ContinuationHandoffError.trustRequired { check(true, "hidden trust prompt surfaces without waiting for timeout") }
         check(ContinuationDesktopHandoff.promptError("Please log in") != nil, "sign-in prompt is actionable")
+        check(ContinuationDesktopHandoff.promptError("Quick safety check: Is this a project you created\n or one you trust?") != nil, "Installed CLI trust wording detected across wrapped lines")
+        check(ContinuationDesktopHandoff.promptError("Choose the text style that looks best with your terminal") != nil, "Hidden first-run setup is actionable")
         let project = root.appendingPathComponent("project space ' é"); try ContinuationFiles.directory(project)
         let source = root.appendingPathComponent("source.json")
         let messages = (0..<40).map { ContinuationMessage(role: $0 % 2 == 0 ? "User" : "Assistant",

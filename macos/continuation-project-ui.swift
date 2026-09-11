@@ -39,9 +39,15 @@ final class ProjectCloneModel: ObservableObject {
     }
     private func run(_ batch: ProjectCloneBatch) async throws -> ProjectCloneBatch {
         let backend = resolveBinary("ai-usagebar")
+        let progress: @Sendable (ProjectCloneBatch) -> Void = { [weak self] snapshot in
+            Task { @MainActor in
+                guard let self, self.worker != nil, self.batch?.id == snapshot.id else { return }
+                self.batch = snapshot
+            }
+        }
         let operation = Task.detached { [store] in
-            let copied = try ProjectCloneEngine.run(batch, store: store)
-            return try ProjectCloneEngine.handoff(copied, store: store, backend: backend)
+            let copied = try ProjectCloneEngine.run(batch, store: store, progress: progress)
+            return try ProjectCloneEngine.handoff(copied, store: store, backend: backend, progress: progress)
         }
         worker = operation
         defer { worker = nil }
@@ -144,7 +150,7 @@ struct ProjectCloneView: View {
             Divider()
             HStack {
                 if model.busy && model.page == 3 {
-                    Button("Stop after this chat") { model.stop() }
+                    Button("Stop") { model.stop() }
                 } else {
                     Button(model.page == 1 ? "Cancel" : "Back") {
                         if model.page == 1 { close() } else { model.returnToProjects() }
@@ -159,7 +165,7 @@ struct ProjectCloneView: View {
                 } else if model.page == 2 {
                     Button("Clone \(model.selectedChats.count) chats") { model.create() }
                         .disabled(model.busy || model.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.destination == .claudeChat).keyboardShortcut(.defaultAction)
-                } else if let batch = model.batch, batch.items.contains(where: { $0.chat != nil && ($0.result?.verified != true || (batch.destination == .claudeDesktopCode && $0.desktopHandoff == nil)) }) {
+                } else if !model.busy, let batch = model.batch, batch.items.contains(where: { $0.chat != nil && ($0.result?.verified != true || (batch.destination == .claudeDesktopCode && $0.desktopHandoff == nil)) }) {
                     Button("Retry") { model.retry() }.disabled(model.busy || model.opener.busy)
                 }
             }.padding(16)
@@ -258,7 +264,13 @@ struct ProjectCloneView: View {
                     HStack {
                         VStack(alignment: .leading) {
                             Text(item.title).lineLimit(2)
-                            if let issue = item.issue { Text(issue).font(.caption).foregroundStyle(.secondary) }
+                            if model.busy && item.desktopHandoff == "opening" {
+                                Text("Opening in Claude…").font(.caption).foregroundStyle(.secondary)
+                            } else if let issue = item.issue {
+                                Text(issue).font(.caption).foregroundStyle(.secondary)
+                            } else if batch.destination == .claudeDesktopCode && item.result?.verified == true && item.desktopHandoff == nil {
+                                Text("History copied · waiting to open").font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                         Spacer()
                         if item.result?.verified == true { Button("Open") { model.open(item, openCLI: openCLI) }.disabled(model.busy || model.opener.busy) }

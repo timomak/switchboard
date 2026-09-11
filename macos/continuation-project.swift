@@ -164,6 +164,7 @@ enum ProjectCloneEngine {
     }
 
     static func handoff(_ input: ProjectCloneBatch, store: ContinuationStore, backend: String?,
+                        progress: (ProjectCloneBatch) -> Void = { _ in },
                         openChat: (String, URL) throws -> Void = { script, folder in
                             try ContinuationDesktopHandoff.run(script: script, directory: folder)
                         }) throws -> ProjectCloneBatch {
@@ -181,7 +182,7 @@ enum ProjectCloneEngine {
                   batch.items[index].desktopHandoff == nil else { continue }
             batch.items[index].desktopHandoff = "opening"
             batch.items[index].issue = "Desktop opening was interrupted. Check Claude before opening again."
-            try save(batch, store: store)
+            try save(batch, store: store); progress(batch)
             do {
                 let child = folder.appendingPathComponent("chats").appendingPathComponent(batch.items[index].id.uuidString)
                 try openChat(ContinuationNative.terminalScript(result, backend: backend), child)
@@ -189,9 +190,13 @@ enum ProjectCloneEngine {
                 batch.items[index].issue = nil
             } catch {
                 batch.items[index].desktopHandoff = "needs-attention"
-                batch.items[index].issue = (error as? ContinuationHandoffError)?.errorDescription ?? "Chat created, but desktop opening needs attention. Use Open in Terminal under Advanced."
+                batch.items[index].issue = error is CancellationError ? "Opening stopped. The saved chat is kept." : (error as? ContinuationHandoffError)?.errorDescription ?? "Chat created, but desktop opening needs attention. Use Open in Terminal under Advanced."
+                try save(batch, store: store); progress(batch)
+                if error is CancellationError { throw CancellationError() }
+                // Do not send the remaining chats into the same blocked launcher.
+                return batch
             }
-            try save(batch, store: store)
+            try save(batch, store: store); progress(batch)
         }
         return batch
     }
@@ -211,6 +216,7 @@ enum ProjectCloneEngine {
     }
 
     static func run(_ input: ProjectCloneBatch, store: ContinuationStore,
+                    progress: (ProjectCloneBatch) -> Void = { _ in },
                     create: (ContinuationDraft, ContinuationBundle) throws -> ContinuationNativeResult = { try ContinuationNative.create($0, bundle: $1) }) throws -> ProjectCloneBatch {
         let folder = directory(input, store: store)
         let fd = open(folder.appendingPathComponent(".lock").path, O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
@@ -242,7 +248,7 @@ enum ProjectCloneEngine {
                 // Always reuse the child directory on retry, including after restart.
                 batch.items[index].issue = (error as? LocalizedError)?.errorDescription ?? "Could not create this chat. Retry."
             }
-            try save(batch, store: store)
+            try save(batch, store: store); progress(batch)
         }
         return batch
     }

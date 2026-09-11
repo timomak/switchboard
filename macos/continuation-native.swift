@@ -16,9 +16,10 @@ enum ContinuationNativeError: LocalizedError {
 }
 
 enum ContinuationHandoffError: LocalizedError {
-    case failed, timedOut, trustRequired, signInRequired
+    case failed, timedOut, trustRequired, signInRequired, setupRequired
     var errorDescription: String? {
         switch self {
+        case .setupRequired: return "Claude needs first-run setup. Use Open in Terminal under Advanced to finish setup for this saved chat."
         case .trustRequired: return "Claude needs folder trust confirmation. Use Open in Terminal under Advanced, then Open this saved chat."
         case .signInRequired: return "Claude needs sign-in. Use Open in Terminal under Advanced, then Open this saved chat."
         case .failed: return "Claude could not finish opening. Use Open in Terminal under Advanced to resolve sign-in or folder access."
@@ -32,9 +33,10 @@ enum ContinuationHandoffError: LocalizedError {
 /// temporary script contains launch arguments only, never conversation text.
 enum ContinuationDesktopHandoff {
     static func promptError(_ text: String) -> ContinuationHandoffError? {
-        let plain = text.replacingOccurrences(of: "\u{1B}\\[[0-9;?]*[A-Za-z]", with: "", options: .regularExpression).lowercased()
-        if plain.contains("do you trust") || plain.contains("trust this folder") || plain.contains("trust the files") || plain.contains("yes, i trust") { return .trustRequired }
-        if plain.contains("please log in") || plain.contains("please sign in") || plain.contains("not logged in") || plain.contains("login required") { return .signInRequired }
+        let plain = text.replacingOccurrences(of: "\u{1B}\\[[0-9;?]*[A-Za-z]", with: "", options: .regularExpression).lowercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        if plain.contains("do you trust") || plain.contains("trust this folder") || plain.contains("trust the files") || plain.contains("yes, i trust") || plain.contains("is this a project you created or one you trust") { return .trustRequired }
+        if plain.contains("please log in") || plain.contains("please sign in") || plain.contains("not logged in") || plain.contains("login required") || plain.contains("select login method") { return .signInRequired }
+        if plain.contains("choose the text style") || plain.contains("managed settings require approval") { return .setupRequired }
         return nil
     }
     static func run(script: String, directory: URL, timeout: TimeInterval = 45) throws {
