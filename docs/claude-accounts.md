@@ -198,6 +198,25 @@ Every switch creates a rollback archive in `~/.claude-acc/backups/`:
 - On Unix, the directory is mode `0700` and archives are mode `0600` because
   they contain credentials and browser state.
 
+Before changing account state, Switchboard also makes best-effort private copies
+of HTML/Markdown artifact sources referenced by native `frame-link` records in
+known Desktop conversation transcripts under `~/.claude/projects/`. Copies live
+in `~/.claude-acc/backups/artifact-copies/` (beside a custom profile store when
+configured). There is no setting, button, viewer, or network request. Transcripts,
+workspace paths, hosted links, and comment monitors are left unchanged.
+
+Copies retain source metadata and distinct content revisions; repeat switches
+deduplicate unchanged content. They are separate from rollback archive retention
+and are never automatically deleted. Protection is bounded: 16 MiB per source,
+256 MiB total copies, the last 8 MiB per transcript and 64 MiB per scan, at most
+4096 entries per directory, with a two-second cooperative scan budget. Missing,
+changing, unsupported, or unreadable sources and exhausted limits are skipped;
+backup failure does not fail switching. This is content preservation, not a
+guarantee of complete artifact recovery. Copies represent the local file at
+switch time; externally referenced assets are not bundled. Claude-hosted artifacts
+may still be inaccessible from another account. No cloud artifact is republished,
+and a saved source does not restore its original card or comments.
+
 The switch clears `bridge-state.json` because stale cloud-session ids can stop
 `/remote-control` from disconnecting. Pass `--keep-bridge` only when testing
 that behavior.
