@@ -16,9 +16,11 @@ enum ContinuationNativeError: LocalizedError {
 }
 
 enum ContinuationHandoffError: LocalizedError {
-    case failed, timedOut
+    case failed, timedOut, trustRequired, signInRequired
     var errorDescription: String? {
         switch self {
+        case .trustRequired: return "Claude needs folder trust confirmation. Use Open in Terminal under Advanced, then Open this saved chat."
+        case .signInRequired: return "Claude needs sign-in. Use Open in Terminal under Advanced, then Open this saved chat."
         case .failed: return "Claude could not finish opening. Use Open in Terminal under Advanced to resolve sign-in or folder access."
         case .timedOut: return "Claude needs attention. Use Open in Terminal under Advanced to finish opening this conversation."
         }
@@ -29,6 +31,12 @@ enum ContinuationHandoffError: LocalizedError {
 /// Transcript output is drained, never displayed, logged, or retained. The
 /// temporary script contains launch arguments only, never conversation text.
 enum ContinuationDesktopHandoff {
+    static func promptError(_ text: String) -> ContinuationHandoffError? {
+        let plain = text.replacingOccurrences(of: "\u{1B}\\[[0-9;?]*[A-Za-z]", with: "", options: .regularExpression).lowercased()
+        if plain.contains("do you trust") || plain.contains("trust this folder") || plain.contains("trust the files") || plain.contains("yes, i trust") { return .trustRequired }
+        if plain.contains("please log in") || plain.contains("please sign in") || plain.contains("not logged in") || plain.contains("login required") { return .signInRequired }
+        return nil
+    }
     static func run(script: String, directory: URL, timeout: TimeInterval = 45) throws {
         try Task.checkCancellation()
         let file = directory.appendingPathComponent(".open-desktop-\(UUID()).sh")
@@ -59,13 +67,20 @@ enum ContinuationDesktopHandoff {
             try? output.fileHandleForReading.close()
         }
         let deadline = Date().addingTimeInterval(timeout)
+        var diagnosticTail = Data()
         while process.isRunning {
             try Task.checkCancellation()
             guard Date() < deadline else { throw ContinuationHandoffError.timedOut }
             var fd = pollfd(fd: output.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
             if poll(&fd, 1, 100) > 0 {
                 var bytes = [UInt8](repeating: 0, count: 16_384)
-                _ = Darwin.read(fd.fd, &bytes, bytes.count)
+                let count = Darwin.read(fd.fd, &bytes, bytes.count)
+                if count > 0 {
+                    diagnosticTail.append(contentsOf: bytes.prefix(count))
+                    if diagnosticTail.count > 16_384 { diagnosticTail.removeFirst(diagnosticTail.count - 16_384) }
+                    // Classify in memory only; never persist terminal output.
+                    if let error = promptError(String(decoding: diagnosticTail, as: UTF8.self)) { throw error }
+                }
             }
         }
         guard process.terminationReason == .exit, process.terminationStatus == 0 else { throw ContinuationHandoffError.failed }

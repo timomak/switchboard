@@ -27,6 +27,16 @@ final class ProjectCloneModel: ObservableObject {
     private var worker: Task<ProjectCloneBatch, Error>?
     let opener = ContinuationModel()
     func stop() { worker?.cancel() }
+    func returnToProjects() {
+        guard !busy, !opener.busy else { return }
+        if let batch { recent = [batch] + recent.filter { $0.id != batch.id } }
+        batch = nil; message = nil; page = 1; opener.finish()
+    }
+    func openTerminal(_ item: ProjectCloneItem) {
+        guard !busy, !opener.busy, let result = item.result, result.verified else { return }
+        do { runInTerminal(try ContinuationNative.terminalScript(result, backend: resolveBinary("ai-usagebar"))) }
+        catch { message = (error as? LocalizedError)?.errorDescription ?? "Could not open Terminal." }
+    }
     private func run(_ batch: ProjectCloneBatch) async throws -> ProjectCloneBatch {
         let backend = resolveBinary("ai-usagebar")
         let operation = Task.detached { [store] in
@@ -115,7 +125,7 @@ struct ProjectCloneView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button { if model.page == 2 { model.page = 1 } else { close() } } label: { Image(systemName: "chevron.left") }.buttonStyle(.plain).help("Back").disabled(model.busy || model.opener.busy)
+                Button { if model.page == 1 { close() } else { model.returnToProjects() } } label: { Image(systemName: "chevron.left") }.buttonStyle(.plain).help("Back").disabled(model.busy || model.opener.busy)
                 Text("Clone project").fontWeight(.medium)
                 Spacer()
                 Image(systemName: "square.on.square").foregroundStyle(.secondary)
@@ -136,9 +146,12 @@ struct ProjectCloneView: View {
                 if model.busy && model.page == 3 {
                     Button("Stop after this chat") { model.stop() }
                 } else {
-                    Button(model.page == 3 ? "Done" : model.page == 2 ? "Back" : "Cancel") {
-                        if model.page == 2 { model.page = 1 } else { close() }
+                    Button(model.page == 1 ? "Cancel" : "Back") {
+                        if model.page == 1 { close() } else { model.returnToProjects() }
                     }.disabled(model.busy || model.opener.busy)
+                    if model.page == 3 {
+                        Button("Done") { model.returnToProjects(); close() }.disabled(model.busy || model.opener.busy)
+                    }
                 }
                 Spacer()
                 if model.page == 1 {
@@ -146,7 +159,7 @@ struct ProjectCloneView: View {
                 } else if model.page == 2 {
                     Button("Clone \(model.selectedChats.count) chats") { model.create() }
                         .disabled(model.busy || model.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.destination == .claudeChat).keyboardShortcut(.defaultAction)
-                } else if let batch = model.batch, batch.items.contains(where: { $0.chat != nil && $0.result?.verified != true }) {
+                } else if let batch = model.batch, batch.items.contains(where: { $0.chat != nil && ($0.result?.verified != true || (batch.destination == .claudeDesktopCode && $0.desktopHandoff == nil)) }) {
                     Button("Retry") { model.retry() }.disabled(model.busy || model.opener.busy)
                 }
             }.padding(16)
@@ -256,6 +269,13 @@ struct ProjectCloneView: View {
                         Text(batch.name)
                         Text(batch.workspace.path).font(.caption).textSelection(.enabled)
                         ForEach(batch.omissions, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
+                        if batch.destination == .claudeDesktopCode {
+                            Menu("Open in Terminal") {
+                                ForEach(batch.items.filter { $0.result?.verified == true }) { item in
+                                    Button(item.title) { model.openTerminal(item) }
+                                }
+                            }.disabled(model.busy || model.opener.busy)
+                        }
                         Menu("Copy context") {
                             ForEach(batch.items) { item in
                                 if let chat = item.chat {
@@ -268,7 +288,7 @@ struct ProjectCloneView: View {
                             }
                         }
                         Button("Show local files") { NSWorkspace.shared.activateFileViewerSelecting([ProjectCloneEngine.directory(batch, store: model.store)]) }
-                        Button("New copy") { model.batch = nil; model.page = 1; model.refresh() }.disabled(model.busy || model.opener.busy)
+                        Button("New copy") { model.returnToProjects() }.disabled(model.busy || model.opener.busy)
                     }.padding(.top, 8)
                 }
             }

@@ -30,6 +30,11 @@ struct ContinuationNativeTests {
         catch is CancellationError { check(true, "cancellation shuts down the hidden handoff") }
         let remnants = try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasPrefix(".open-desktop-") }
         check(remnants.isEmpty, "success, failure and cancellation remove temporary launch scripts")
+        do {
+            try ContinuationDesktopHandoff.run(script: "echo 'Do you trust this folder?'\nsleep 5\n", directory: root)
+            fatalError("Trust prompt must surface")
+        } catch ContinuationHandoffError.trustRequired { check(true, "hidden trust prompt surfaces without waiting for timeout") }
+        check(ContinuationDesktopHandoff.promptError("Please log in") != nil, "sign-in prompt is actionable")
         let project = root.appendingPathComponent("project space ' é"); try ContinuationFiles.directory(project)
         let source = root.appendingPathComponent("source.json")
         let messages = (0..<40).map { ContinuationMessage(role: $0 % 2 == 0 ? "User" : "Assistant",

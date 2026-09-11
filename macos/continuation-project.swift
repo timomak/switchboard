@@ -189,7 +189,7 @@ enum ProjectCloneEngine {
                 batch.items[index].issue = nil
             } catch {
                 batch.items[index].desktopHandoff = "needs-attention"
-                batch.items[index].issue = "Chat created, but desktop opening needs attention. Use Open to finish."
+                batch.items[index].issue = (error as? ContinuationHandoffError)?.errorDescription ?? "Chat created, but desktop opening needs attention. Use Open in Terminal under Advanced."
             }
             try save(batch, store: store)
         }

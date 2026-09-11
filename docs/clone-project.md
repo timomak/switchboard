@@ -73,3 +73,16 @@ limits and cannot claim complete cloud/archive membership.
 `macos/run-tests.sh` includes synthetic isolated batch tests for folder boundaries,
 copy exclusions, unavailable inputs, partial failure, restart/retry identities and
 uncertain creation. No live destination histories or desktop UI are needed.
+
+## Navigation and interactive Claude prompts
+
+Back returns from both review and results to project selection; Done resets the flow
+before closing. Saved copies remain under Advanced → Previous copies. Retry resumes
+unattempted desktop handoffs after Stop without recreating histories or automatically
+repeating uncertain handoffs.
+
+The hidden terminal classifies folder-trust and sign-in prompts in a bounded in-memory
+buffer. It retains only the actionable error category, never terminal output. It does
+not accept trust or sign in automatically. Advanced → Open in Terminal targets the same
+saved session so the user can complete required interaction. Manual Open then records
+successful readiness. A generic timeout still does not establish its underlying cause.
