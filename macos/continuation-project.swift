@@ -20,7 +20,8 @@ struct ContinuationProject: Identifiable {
 }
 
 enum ProjectFolderMode: String, Codable, CaseIterable {
-    case empty, copy, shared
+    case shared, empty, copy
+    static let defaultMode: Self = .shared
     var title: String {
         switch self {
         case .empty: return "New empty folder"

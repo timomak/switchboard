@@ -102,6 +102,13 @@ struct ProjectCloneTests {
         try ProjectCloneEngine.save(failed, store: store)
         let recovered = try ProjectCloneEngine.recordOpened(failed, itemID: failed.items[0].id, store: store)
         check(recovered.desktopReadyCount == 1 && recovered.items[0].issue == nil, "Successful manual Open clears failure and persists desktop-ready status")
+        check(ProjectFolderMode.defaultMode == .shared, "Project cloning defaults to the original folder")
+        let sourceBefore = try Data(contentsOf: source.appendingPathComponent("readme.txt"))
+        let shared = try ProjectCloneEngine.prepare(project: project, selected: selection, name: "Shared history",
+            destination: .claudeCode, mode: .defaultMode, store: store, read: { $0.chat })
+        let sharedResult = try ProjectCloneEngine.run(shared, store: store, create: creator)
+        check(sharedResult.items.allSatisfy { $0.result?.workspace == source }, "Every copied chat uses the same original source folder")
+        check(try Data(contentsOf: source.appendingPathComponent("readme.txt")) == sourceBefore, "Shared-folder preparation leaves working files unchanged")
         print("✓ \(checks) project clone checks passed; isolated synthetic stores only.")
     }
 }

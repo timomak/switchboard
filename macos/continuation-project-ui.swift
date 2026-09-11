@@ -18,7 +18,7 @@ final class ProjectCloneModel: ObservableObject {
     @Published var query = ""
     @Published var chatQuery = ""
     @Published var name = ""
-    @Published var mode: ProjectFolderMode = .empty
+    @Published var mode: ProjectFolderMode = .defaultMode
     @Published var batch: ProjectCloneBatch?
     @Published var recent: [ProjectCloneBatch] = []
     @Published var busy = false
@@ -227,7 +227,11 @@ struct ProjectCloneView: View {
                     } else if model.mode == .copy {
                         Text("Copies regular files, including untracked files. Excludes dotfiles, Git history, dependencies, agent instructions and common secret files. Check your source files before copying; filenames cannot identify every credential. Maximum 100 MB.").font(.caption)
                     }
-                    Text("New folders are stored with the copy in Switchboard’s local files.").font(.caption).foregroundStyle(.secondary)
+                    if model.mode == .shared, let project = model.project {
+                        Text(project.workspace.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    } else {
+                        Text("New folders are stored with the copy in Switchboard’s local files.").font(.caption).foregroundStyle(.secondary)
+                    }
                     Text("Unavailable content is omitted. Instructions, native attachments, tool execution and running work do not transfer. Chat ordering may differ.").font(.caption).foregroundStyle(.secondary)
                 }.padding(.top, 8)
             }

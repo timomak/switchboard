@@ -25,8 +25,12 @@ explicit recovery action. Desktop project grouping is not recreated. Claude Chat
 is not offered as a native destination; use the conversation tool for explicit
 context handoff. Codex Desktop defaults to Claude Desktop Code.
 
-The default is a new empty folder, stored with the batch under Switchboard's
-Application Support directory. Advanced also offers:
+The default is **Use source folder**: all copied chats use the original project's
+folder. Chat histories have independent IDs; working files are shared, so edits in
+either app affect the same files. The source path is shown under Advanced.
+
+Advanced also offers a new empty folder or a copied folder, stored with the batch
+under Switchboard's Application Support directory:
 
 - **Copy source files:** bounded regular-file snapshot, including untracked files.
   Excludes dotfiles, Git metadata, common generated/dependency folders, agent
