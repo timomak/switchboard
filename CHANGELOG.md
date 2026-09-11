@@ -11,6 +11,11 @@ Each release is also published at
 
 ### Added
 
+- Clone selected project conversations between supported local apps and CLIs,
+  keeping independent histories in the original shared workspace by default.
+  Includes explicit project membership, saved progress, recovery, and optional
+  folder/name settings under Advanced.
+
 - The macOS menu bar can show *when* a window resets — a wall-clock time, or a
   date once the reset is past today — instead of the countdown, under
   **Preferences → Display**. Off by default; the countdown is unchanged unless
@@ -55,6 +60,10 @@ Each release is also published at
   ever. Both match on `VendorId`, so that case now fails to compile.
 
 ### Fixed
+
+- Claude Desktop handoff now resolves workspace symlinks, repairs older cloned
+  sessions without changing their IDs, and shows interactive trust/setup prompts
+  in Terminal. Project cloning reports per-chat progress and supports Back and Stop.
 
 - The macOS menu bar icon no longer disappears mid-session. `AppMain` held its
   `AppDelegate` in a `main()` local, and `NSApplication.delegate` is a *weak*
