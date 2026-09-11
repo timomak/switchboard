@@ -84,12 +84,24 @@ struct ProjectCloneTests {
         } catch ContinuationError.invalid { check(true, "Project name cannot escape copy directory") }
         let desktop = try ProjectCloneEngine.prepare(project: project, selected: [chats[0].id], name: "Desktop",
             destination: .claudeDesktopCode, mode: .empty, store: store, read: { $0.chat })
-        let persisted = try ProjectCloneEngine.run(desktop, store: store, create: creator)
+        let persisted = try ProjectCloneEngine.run(desktop, store: store, create: { draft, bundle in
+            var result = try creator(draft, bundle)
+            result.storageRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
+            return result
+        })
         var handoffs = 0
-        let opened = try ProjectCloneEngine.handoff(persisted, store: store, openChat: { _, _ in handoffs += 1 })
+        let opened = try ProjectCloneEngine.handoff(persisted, store: store, backend: "/fixture/switchboard-backend", openChat: { script, _ in
+            check(script.contains("'/fixture/switchboard-backend' 'cli' 'launch' 'claude' '--'"), "Automatic handoff uses the same configured launcher as Open")
+            handoffs += 1
+        })
         check(handoffs == 1 && opened.items[0].desktopHandoff == "opened", "Desktop destination performs handoff after persistence")
-        _ = try ProjectCloneEngine.handoff(persisted, store: store, openChat: { _, _ in fatalError("Repeated handoff") })
+        _ = try ProjectCloneEngine.handoff(persisted, store: store, backend: "/fixture/switchboard-backend", openChat: { _, _ in fatalError("Repeated handoff") })
         check(true, "Desktop handoff receipt prevents automatic repetition")
+        check(persisted.desktopReadyCount == 0 && opened.desktopReadyCount == 1, "Persisted history is not reported as desktop-ready until handoff completes")
+        var failed = opened; failed.items[0].desktopHandoff = "needs-attention"; failed.items[0].issue = "Opening failed"
+        try ProjectCloneEngine.save(failed, store: store)
+        let recovered = try ProjectCloneEngine.recordOpened(failed, itemID: failed.items[0].id, store: store)
+        check(recovered.desktopReadyCount == 1 && recovered.items[0].issue == nil, "Successful manual Open clears failure and persists desktop-ready status")
         print("✓ \(checks) project clone checks passed; isolated synthetic stores only.")
     }
 }

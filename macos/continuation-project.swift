@@ -50,6 +50,10 @@ struct ProjectCloneBatch: Codable, Identifiable {
     var omissions: [String]
     var items: [ProjectCloneItem]
     var verifiedCount: Int { items.filter { $0.result?.verified == true }.count }
+    var desktopReadyCount: Int { items.filter { $0.desktopHandoff == "opened" }.count }
+    var resultTitle: String {
+        destination == .claudeDesktopCode ? "\(desktopReadyCount) of \(items.count) chats ready in Claude" : "\(verifiedCount) of \(items.count) chats cloned"
+    }
 }
 
 enum ProjectCloneEngine {
@@ -158,9 +162,9 @@ enum ProjectCloneEngine {
         return ["Copied regular files only; \(omitted) excluded entries. No Git history, dotfiles, dependencies or agent instructions. Historical absolute paths are unchanged."]
     }
 
-    static func handoff(_ input: ProjectCloneBatch, store: ContinuationStore,
-                        openChat: (ContinuationNativeResult, URL) throws -> Void = { result, folder in
-                            try ContinuationDesktopHandoff.run(script: ContinuationNative.terminalScript(result, backend: nil), directory: folder)
+    static func handoff(_ input: ProjectCloneBatch, store: ContinuationStore, backend: String?,
+                        openChat: (String, URL) throws -> Void = { script, folder in
+                            try ContinuationDesktopHandoff.run(script: script, directory: folder)
                         }) throws -> ProjectCloneBatch {
         guard input.destination == .claudeDesktopCode else { return input }
         let folder = directory(input, store: store)
@@ -179,7 +183,7 @@ enum ProjectCloneEngine {
             try save(batch, store: store)
             do {
                 let child = folder.appendingPathComponent("chats").appendingPathComponent(batch.items[index].id.uuidString)
-                try openChat(result, child)
+                try openChat(ContinuationNative.terminalScript(result, backend: backend), child)
                 batch.items[index].desktopHandoff = "opened"
                 batch.items[index].issue = nil
             } catch {
@@ -188,6 +192,20 @@ enum ProjectCloneEngine {
             }
             try save(batch, store: store)
         }
+        return batch
+    }
+
+    static func recordOpened(_ input: ProjectCloneBatch, itemID: UUID, store: ContinuationStore) throws -> ProjectCloneBatch {
+        let folder = directory(input, store: store)
+        let fd = open(folder.appendingPathComponent(".lock").path, O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard fd >= 0 else { throw ContinuationError.storage }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw ContinuationError.storage }
+        defer { flock(fd, LOCK_UN) }
+        var batch = try load(folder)
+        guard let index = batch.items.firstIndex(where: { $0.id == itemID }), batch.items[index].result?.verified == true else { throw ContinuationError.invalid }
+        batch.items[index].desktopHandoff = "opened"; batch.items[index].issue = nil
+        try save(batch, store: store)
         return batch
     }
 

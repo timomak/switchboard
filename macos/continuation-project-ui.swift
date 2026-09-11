@@ -28,9 +28,10 @@ final class ProjectCloneModel: ObservableObject {
     let opener = ContinuationModel()
     func stop() { worker?.cancel() }
     private func run(_ batch: ProjectCloneBatch) async throws -> ProjectCloneBatch {
+        let backend = resolveBinary("ai-usagebar")
         let operation = Task.detached { [store] in
             let copied = try ProjectCloneEngine.run(batch, store: store)
-            return try ProjectCloneEngine.handoff(copied, store: store)
+            return try ProjectCloneEngine.handoff(copied, store: store, backend: backend)
         }
         worker = operation
         defer { worker = nil }
@@ -87,14 +88,18 @@ final class ProjectCloneModel: ObservableObject {
         }
     }
     func open(_ item: ProjectCloneItem, openCLI: (String, String?) -> Void) {
-        guard !opener.busy, let batch, let chat = item.chat, let result = item.result, result.verified else { return }
+        guard !busy, !opener.busy, let batch, let chat = item.chat, let result = item.result, result.verified else { return }
         let folder = ProjectCloneEngine.directory(batch, store: store).appendingPathComponent("chats").appendingPathComponent(item.id.uuidString)
         do {
             let receipt = try JSONDecoder().decode(ContinuationReceipt.self, from: ContinuationFiles.read(folder.appendingPathComponent("manifest.json"), limit: ContinuationLimits.input))
             var draft = ContinuationDraft(chat: chat, destination: batch.destination); draft.workspace = batch.workspace
             opener.draft = draft; opener.nativeResult = result
             opener.bundle = .init(directory: folder, context: draft.context, receipt: receipt)
-            opener.openDestination(openCLI: openCLI)
+            opener.openDestination(openCLI: openCLI, onOpened: { [weak self] in
+                guard let self, batch.destination == .claudeDesktopCode else { return }
+                do { self.batch = try ProjectCloneEngine.recordOpened(batch, itemID: item.id, store: self.store) }
+                catch { self.message = "Chat opened, but its status could not be saved." }
+            })
         } catch { message = "Could not open the saved chat. Its copy is still available in the destination." }
     }
 }
@@ -231,7 +236,7 @@ struct ProjectCloneView: View {
     private var results: some View {
         Group {
             if let batch = model.batch {
-                Text("\(batch.verifiedCount) of \(batch.items.count) chats cloned").font(.title3).fontWeight(.semibold)
+                Text(batch.resultTitle).font(.title3).fontWeight(.semibold)
                 ForEach(batch.items) { item in
                     HStack {
                         VStack(alignment: .leading) {

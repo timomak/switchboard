@@ -18,7 +18,8 @@ exclude individual chats. Source catalogs are read only.
 Each readable conversation becomes a separate native chat using the existing
 version-sensitive adapters. Codex Desktop/CLI and Claude Code CLI persistence use
 the existing engine. Claude Desktop Code copies are initially Claude Code sessions;
-the batch then performs each desktop handoff in sequence. A durable handoff marker
+the batch then performs each desktop handoff in sequence using the same configured
+Switchboard CLI launcher as manual Open. A durable handoff marker
 prevents automatic repetition after success or uncertain opening. Open remains an
 explicit recovery action. Desktop project grouping is not recreated. Claude Chat
 is not offered as a native destination; use the conversation tool for explicit
@@ -41,7 +42,10 @@ Application Support directory. Advanced also offers:
 Visible user/assistant text is retained by the existing conversion. Project
 instructions, native attachment bytes, tools and running work are omitted.
 Unavailable/invalid/changing chat inputs remain in the total as omitted entries.
-Results always report “N of M chats cloned”, not a complete project clone.
+Results report “N of M chats cloned” for native stores. Claude Desktop reports
+“N of M chats ready in Claude”, counting only completed desktop handoffs. Native
+persistence alone is not desktop readiness. Successful manual Open saves readiness
+and clears a prior handoff issue. This is not a complete project clone.
 
 ## Recovery
 
