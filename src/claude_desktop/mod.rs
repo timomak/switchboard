@@ -20,6 +20,7 @@
 //! everywhere.
 
 pub mod app;
+mod artifacts;
 pub mod capture;
 pub mod merge;
 
@@ -68,6 +69,7 @@ pub const ACCOUNT_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// Constructed with [`Paths::at`] in tests so nothing reads a real `$HOME`.
 #[derive(Debug, Clone)]
 pub struct Paths {
+    pub claude_code_root: PathBuf,
     pub data_dir: PathBuf,
     pub profiles_dir: PathBuf,
     pub backups_dir: PathBuf,
@@ -77,6 +79,7 @@ impl Paths {
     /// Test seam: every root explicit.
     pub fn at(data_dir: PathBuf, profiles_dir: PathBuf, backups_dir: PathBuf) -> Self {
         Self {
+            claude_code_root: data_dir.join(".claude"),
             data_dir,
             profiles_dir,
             backups_dir,
@@ -96,6 +99,7 @@ impl Paths {
             .map_or_else(|| home.join(".claude-acc"), Path::to_path_buf)
             .join("backups");
         Ok(Self {
+            claude_code_root: home.join(".claude"),
             data_dir: home.join("Library/Application Support/Claude"),
             profiles_dir,
             backups_dir,
@@ -435,6 +439,8 @@ pub fn apply_switch(paths: &Paths, plan: &SwitchPlan, app: &dyn AppControl) -> R
                 &mut notes,
             );
         }
+        // Best effort: local content protection must never block an account switch.
+        artifacts::preserve(paths);
         apply_switch_while_stopped(paths, plan, &mut notes)
     })();
 
@@ -1235,6 +1241,53 @@ mod tests {
         assert_eq!(steps[0], "quit");
         assert!(steps[1].starts_with("archive "), "{steps:?}");
         assert_eq!(steps[2], "relaunch");
+    }
+
+    #[test]
+    fn switch_preserves_artifacts_but_planning_does_not() {
+        let fixture = fixture();
+        let id = "11111111-1111-4111-8111-111111111111";
+        let source = fixture.paths.data_dir.join("plan.html");
+        write(&source, "<html>Plan</html>");
+        write(
+            &fixture
+                .paths
+                .sessions_root()
+                .join("uuid-here/org-1/local_artifact.json"),
+            &serde_json::json!({"cliSessionId": id}).to_string(),
+        );
+        let transcript = fixture
+            .paths
+            .claude_code_root
+            .join(format!("projects/example/{id}.jsonl"));
+        let record = serde_json::json!({"type":"frame-link", "sessionId":id, "path":source,
+            "frameUrl":"https://claude.ai/code/artifact/22222222-2222-4222-8222-222222222222"})
+        .to_string();
+        write(&transcript, &record);
+        let plan = plan_switch(&fixture.paths, "there", SwitchOpts::default()).unwrap();
+        let copies = fixture.paths.backups_dir.join("artifact-copies");
+        assert!(!copies.exists());
+        apply_switch(&fixture.paths, &plan, &Recorder::default()).unwrap();
+        assert_eq!(std::fs::read_dir(copies).unwrap().count(), 1);
+        assert_eq!(std::fs::read_to_string(transcript).unwrap(), record);
+    }
+
+    #[test]
+    fn artifact_storage_failure_does_not_prevent_switch_or_relaunch() {
+        let fixture = fixture();
+        write(
+            &fixture.paths.backups_dir.join("artifact-copies"),
+            "unavailable",
+        );
+        let plan = plan_switch(&fixture.paths, "there", SwitchOpts::default()).unwrap();
+        let recorder = Recorder::default();
+        apply_switch(&fixture.paths, &plan, &recorder).unwrap();
+        assert_eq!(recorder.steps().last().unwrap(), "relaunch");
+        assert!(
+            std::fs::read_to_string(fixture.paths.config_json())
+                .unwrap()
+                .contains("uuid-there")
+        );
     }
 
     #[test]

@@ -11,6 +11,9 @@ Each release is also published at
 
 ### Added
 
+- Silently preserve local Claude artifact source files before desktop account
+  switching, without changing the chat UI or publishing anything online.
+
 - Clone selected project conversations between supported local apps and CLIs,
   keeping independent histories in the original shared workspace by default.
   Includes explicit project membership, saved progress, recovery, and optional
