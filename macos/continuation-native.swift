@@ -467,12 +467,16 @@ enum ContinuationNative {
         guard result.verified, UUID(uuidString: result.id) != nil else { throw ContinuationNativeError.verification }
         let result = try repairClaudeWorkspace(result)
         let claude = result.destination == .claudeCode || result.destination == .claudeDesktopCode
-        guard let binary = binaryOverride ?? executable(claude ? "claude" : "codex") else { throw ContinuationNativeError.missingCLI(claude ? "Claude Code" : "Codex") }
         let args = claude ? ["--resume", result.id] + (result.destination == .claudeDesktopCode ? ["/desktop"] : []) : ["resume", result.id]
         // The established launcher selects Claude's existing configured login.
         let defaultClaudeRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
         let useBackend = claude && backend != nil && result.storageRoot.standardizedFileURL.path == defaultClaudeRoot.standardizedFileURL.path
-        let command = useBackend ? [backend!, "cli", "launch", "claude", "--"] + args : [binary.path] + args
+        let command: [String]
+        if useBackend { command = [backend!, "cli", "launch", "claude", "--"] + args }
+        else {
+            guard let binary = binaryOverride ?? executable(claude ? "claude" : "codex") else { throw ContinuationNativeError.missingCLI(claude ? "Claude Code" : "Codex") }
+            command = [binary.path] + args
+        }
         let rootKey = claude ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"
         return "#!/bin/bash\nset -e\ncd -- \(quote(result.workspace.path))\nexport \(rootKey)=\(quote(result.storageRoot.path))\n" + command.map(quote).joined(separator: " ") + "\n"
     }
