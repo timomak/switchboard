@@ -34,12 +34,60 @@ enum ContinuationHandoffError: LocalizedError {
 enum ContinuationDesktopHandoff {
     static func promptError(_ text: String) -> ContinuationHandoffError? {
         let plain = text.replacingOccurrences(of: "\u{1B}\\[[0-9;?]*[A-Za-z]", with: "", options: .regularExpression).lowercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        let compact = plain.filter { !$0.isWhitespace }
+        if compact.contains("isthisaprojectyoucreatedoroneyoutrust") || compact.contains("yes,itrustthisfolder") { return .trustRequired }
+        if compact.contains("choosethetextstyle") { return .setupRequired }
+        if compact.contains("pleaselogin") || compact.contains("selectloginmethod") { return .signInRequired }
         if plain.contains("do you trust") || plain.contains("trust this folder") || plain.contains("trust the files") || plain.contains("yes, i trust") || plain.contains("is this a project you created or one you trust") { return .trustRequired }
         if plain.contains("please log in") || plain.contains("please sign in") || plain.contains("not logged in") || plain.contains("login required") || plain.contains("select login method") { return .signInRequired }
         if plain.contains("choose the text style") || plain.contains("managed settings require approval") { return .setupRequired }
         return nil
     }
-    static func run(script: String, directory: URL, timeout: TimeInterval = 45) throws {
+    static func run(script: String, directory: URL, timeout: TimeInterval = 45, interactive: Bool = true) throws {
+        do { try runHidden(script: script, directory: directory, timeout: timeout) }
+        catch let error as ContinuationHandoffError {
+            switch error {
+            case .trustRequired, .signInRequired, .setupRequired:
+                guard interactive else { throw error }
+                try runInteractive(script: script, directory: directory)
+            default: throw error
+            }
+        }
+    }
+
+    // Only a recognized interactive prompt switches to a visible terminal.
+    // Resume the same saved session and wait for its exit before advancing.
+    static func runInteractive(script: String, directory: URL, timeout: TimeInterval = 180,
+                               launch: (String) throws -> Void = launchTerminal) throws {
+        try Task.checkCancellation()
+        let token = UUID().uuidString
+        let file = directory.appendingPathComponent(".interactive-" + token + ".sh")
+        let status = directory.appendingPathComponent(".interactive-" + token + ".status")
+        let command = "(\n" + script + "\n)\nresult=$?\nprintf '%s' \"$result\" > " + ContinuationNative.quote(status.path + ".tmp") + "\nmv -- " + ContinuationNative.quote(status.path + ".tmp") + " " + ContinuationNative.quote(status.path) + "\nexit \"$result\"\n"
+        try ContinuationFiles.write(Data(command.utf8), to: file)
+        try launch("/bin/bash " + ContinuationNative.quote(file.path))
+        let deadline = Date().addingTimeInterval(timeout)
+        while !FileManager.default.fileExists(atPath: status.path) {
+            try Task.checkCancellation()
+            guard Date() < deadline else { throw ContinuationHandoffError.timedOut }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        defer { try? FileManager.default.removeItem(at: file); try? FileManager.default.removeItem(at: status) }
+        let result = try String(contentsOf: status, encoding: .utf8)
+        guard result == "0" else { throw ContinuationHandoffError.failed }
+    }
+
+    private static func launchTerminal(_ command: String) throws {
+        let escaped = command.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", "tell application \"Terminal\" to do script \"" + escaped + "\"", "-e", "tell application \"Terminal\" to activate"]
+        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+        try process.run(); process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw ContinuationHandoffError.failed }
+    }
+
+    private static func runHidden(script: String, directory: URL, timeout: TimeInterval) throws {
         try Task.checkCancellation()
         let file = directory.appendingPathComponent(".open-desktop-\(UUID()).sh")
         // A PTY started from a GUI inherits a 0×0 window. Give terminal UI
@@ -294,7 +342,8 @@ enum ContinuationNative {
         guard draft.destination != .claudeChat else { throw ContinuationNativeError.chatUnsupported }
         let values = messages(draft, bundle: bundle)
         let root = rootOverride ?? storageRoot(draft.destination)
-        let cwd = draft.workspace ?? bundle.directory.appendingPathComponent("workspace")
+        let requestedCwd = draft.workspace ?? bundle.directory.appendingPathComponent("workspace")
+        let cwd = (draft.destination == .claudeCode || draft.destination == .claudeDesktopCode) ? requestedCwd.resolvingSymlinksInPath() : requestedCwd
         if draft.workspace == nil { try ContinuationFiles.directory(cwd) }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: cwd.path, isDirectory: &isDirectory), isDirectory.boolValue else { throw ContinuationNativeError.workspace }
@@ -386,8 +435,37 @@ enum ContinuationNative {
         }
     }
     static func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+    // Older clones may be indexed under a symlink spelling that Claude never
+    // searches. Publish the same session ID under the physical workspace key.
+    static func repairClaudeWorkspace(_ result: ContinuationNativeResult) throws -> ContinuationNativeResult {
+        guard result.destination == .claudeCode || result.destination == .claudeDesktopCode else { return result }
+        let physical = result.workspace.resolvingSymlinksInPath()
+        guard physical.path != result.workspace.path, let source = result.transcript else { return result }
+        let key = physical.path.precomposedStringWithCanonicalMapping.utf16.map { unit -> String in
+            if (65...90).contains(unit) || (97...122).contains(unit) || (48...57).contains(unit) { return String(UnicodeScalar(unit)!) }
+            return "-"
+        }.joined()
+        guard key.utf8.count <= 200 else { throw ContinuationNativeError.workspace }
+        let folder = result.storageRoot.appendingPathComponent("projects").appendingPathComponent(key)
+        try ContinuationFiles.directory(folder)
+        let target = folder.appendingPathComponent(result.id + ".jsonl")
+        if !FileManager.default.fileExists(atPath: target.path) {
+            let rows = try ContinuationFiles.read(source, limit: ContinuationLimits.input).split(separator: 10).map { line -> [String: Any] in
+                guard var row = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { throw ContinuationNativeError.verification }
+                if let sessionID = row["sessionId"] as? String, sessionID != result.id { throw ContinuationNativeError.verification }
+                if row["cwd"] != nil { row["cwd"] = physical.path }
+                return row
+            }
+            do { try publish(lines(rows), to: target) }
+            catch { guard FileManager.default.fileExists(atPath: target.path) else { throw error } }
+        }
+        var repaired = result; repaired.workspace = physical; repaired.transcript = target
+        return repaired
+    }
+
     static func terminalScript(_ result: ContinuationNativeResult, backend: String?, binaryOverride: URL? = nil) throws -> String {
         guard result.verified, UUID(uuidString: result.id) != nil else { throw ContinuationNativeError.verification }
+        let result = try repairClaudeWorkspace(result)
         let claude = result.destination == .claudeCode || result.destination == .claudeDesktopCode
         guard let binary = binaryOverride ?? executable(claude ? "claude" : "codex") else { throw ContinuationNativeError.missingCLI(claude ? "Claude Code" : "Codex") }
         let args = claude ? ["--resume", result.id] + (result.destination == .claudeDesktopCode ? ["/desktop"] : []) : ["resume", result.id]

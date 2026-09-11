@@ -86,3 +86,11 @@ buffer. It retains only the actionable error category, never terminal output. It
 not accept trust or sign in automatically. Advanced → Open in Terminal targets the same
 saved session so the user can complete required interaction. Manual Open then records
 successful readiness. A generic timeout still does not establish its underlying cause.
+
+### Claude folder trust
+
+Claude can pause at a folder-trust prompt, including when a source folder is a symlink to another workspace. The hidden handoff recognizes cursor-positioned prompts even when terminal output omits spaces. It then resumes the same saved chat in a visible Terminal tab and waits for a successful exit before marking that chat ready and continuing the batch. The user answers Claude’s trust or setup prompt; Switchboard never accepts it automatically.
+
+Stopping while a visible Terminal tab is waiting stops batch tracking; the user retains control of that tab. Completed histories stay saved. No raw terminal output is persisted by the app.
+
+Claude transcripts are indexed by the resolved physical workspace path. Opening an older clone saved under a symlink spelling publishes its existing session ID and history under the physical key without overwriting a canonical transcript that already exists. Original project files remain untouched.
