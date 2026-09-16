@@ -1200,6 +1200,7 @@ mod tests {
             },
             outgoing: Some("personal".into()),
             sessions: Default::default(),
+            session_state: Default::default(),
             scheduled: None,
             tokens: claude_desktop::SavedTokens {
                 token_cache: "{}".into(),
@@ -1275,6 +1276,7 @@ mod tests {
             updated: 1,
             conflicts: 3,
             canonical_routines: Default::default(),
+            canonical_enabled: Default::default(),
         });
 
         let out = plan_lines(&plan).join("\n");
