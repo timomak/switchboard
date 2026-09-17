@@ -238,10 +238,18 @@ CLI accounts use `[[anthropic.accounts]]` or `accounts_dir`. Desktop profiles
 use claude-acc's format under `~/.claude-acc/profiles`; override that path with
 `[anthropic] desktop_profiles_dir`. Existing claude-acc profiles work as-is.
 
-History merges can expose deletions that another account has not seen yet.
-When that happens, ai-usagebar asks whether to keep every copy, delete the item
-from all accounts, or decide one item at a time. Deleting a chat removes only
-its index; transcripts under `~/.claude/projects/` are never touched.
+A chat deleted inside Claude stays deleted. The app records each deletion as a
+`deleted_<id>` marker beside the account's session indexes and consults those
+markers before re-adopting a transcript. A switch honours them everywhere: the
+chat's index leaves every account without a prompt, and the marker is copied
+into every account/org folder so no account's import scan brings the
+conversation back. A chat imported again after its deletion is newer than the
+marker and is kept. Transcripts under `~/.claude/projects/` are never touched.
+
+History merges can still expose deletions with no marker — an index that
+vanished under an older app version or another tool. When that happens,
+ai-usagebar asks whether to keep every copy, delete the item from all accounts,
+or decide one item at a time. Deleting a chat removes only its index.
 
 Non-interactive switches always keep conflicting items. The macOS menu bar
 shows the same choices in a dialog. For scripts, `account status --json` lists
@@ -261,12 +269,41 @@ chat archived or routine paused. A later explicit unarchive or resume is tracked
 and can propagate; these states do not permanently override new user edits.
 New baseline fields are additive to the existing profile-store format.
 
-Claude Code sidebar groups and their chat assignments are not reconciled by
-account switching. They live in a separate account/organization-scoped browser
-store, so copied chats can appear under Ungrouped. The project-cloning feature
-does not fix native Claude group continuity. See the
-[state investigation](claude-switch-state-investigation.md) for the required
-backend storage work and artifact limitations.
+Where a folder already carries the app's `archived-sessions.idx` load hint, the
+switch regenerates it from the reconciled flags so the app never defers the
+wrong chats.
+
+### Sidebar groups and view mode
+
+The Code sidebar's custom groups (shown as projects), their chat assignments,
+and the grouping/sorting mode live in the renderer's `localStorage`, scoped to
+one account and organisation. Restoring an account's saved browser state used
+to restore whatever that account last showed — another grouping mode, or stale
+empty groups with every merged chat under Ungrouped.
+
+A switch now carries one reconciled sidebar. After the outgoing account's
+browser state is saved, its scope is compared with the last observation of that
+scope: groups added, renamed or deleted, chats moved between groups, reordered
+members, and a changed view mode are folded into the canonical sidebar, which
+is then written into the incoming account's scope before the app relaunches.
+Groups persist until deleted. A scope that lost every group at once is not
+treated as a deletion of all of them — that is also what the app's own server
+merge produces — so deleting the last remaining group does not propagate.
+
+Group definitions and the view mode are synced by the app to its server per
+organisation, and a pull replaces local groups when the two differ. The switch
+therefore also sets the app's own pending-edit marker for the store so the
+first reconcile after launch pushes the merged sidebar instead of pulling the
+stale one over it. Chat assignments are local-only and are never uploaded.
+The store is rewritten through a staged copy that is read back before it
+replaces the original; a failure leaves the target's browser state as saved
+and is reported as a note. The `dframe-group-scopes` mirror in
+`claude_desktop_config.json` is updated to match. Nothing is carried when the
+incoming account has no saved browser state or no known organisation.
+
+Claude-hosted artifacts and their comment monitors stay with the account and
+organisation that published them; see the
+[state investigation](claude-switch-state-investigation.md).
 
 Account removal and chat filters (`only` / `reset`) are not implemented. Remove
 a profile directory manually. Cowork sessions stay with the

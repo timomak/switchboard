@@ -77,6 +77,11 @@ ratatui-bubbletea-theme = "0.2"
 # AUR source build's hermeticity (see CLAUDE.md's release checklist).
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 uuid = { version = "1.26.1", features = ["v4"] }
+# Reads and writes Chromium's localStorage LevelDB in the Claude Desktop data
+# directory (the renderer's sidebar store), while the app is stopped. A pure
+# Rust re-implementation of the LevelDB file format — no libleveldb and no C
+# build, so the source build needs nothing beyond cargo.
+rusty-leveldb = "4"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process", "fs"] }

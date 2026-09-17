@@ -11,6 +11,18 @@ Each release is also published at
 
 ### Added
 
+- Carry the Claude Code sidebar across Desktop account switches: custom groups
+  (projects), their chat assignments, and the grouping/sorting mode are
+  reconciled from the outgoing account's edits and written into the incoming
+  account's browser store before the app relaunches, with the app's own
+  pending-edit marker set so its server sync keeps the result. Groups persist
+  until deleted. No new UI.
+
+- Chats deleted inside Claude no longer come back after a switch. The app's
+  own `deleted_<id>` markers are honoured everywhere without a prompt, and
+  copied into every account so no import scan re-adopts the transcript.
+  Transcripts are never touched.
+
 - Silently preserve local Claude artifact source files before desktop account
   switching, without changing the chat UI or publishing anything online.
 
