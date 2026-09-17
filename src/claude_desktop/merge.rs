@@ -85,6 +85,17 @@ pub fn plan_session_merge(
     account_uuid: &str,
     org_uuid: &str,
 ) -> SessionMerge {
+    plan_session_merge_excluding(sessions_root, account_uuid, org_uuid, &BTreeSet::new())
+}
+
+/// [`plan_session_merge`] that never copies the named index files — chats the
+/// app's own deletion markers say are gone (see [`super::tombstones`]).
+pub fn plan_session_merge_excluding(
+    sessions_root: &Path,
+    account_uuid: &str,
+    org_uuid: &str,
+    excluded: &BTreeSet<String>,
+) -> SessionMerge {
     let target_dir = sessions_root.join(account_uuid).join(org_uuid);
 
     // Keyed by destination so two source accounts holding the same index can't
@@ -99,6 +110,9 @@ pub fn plan_session_merge(
             let Some(name) = source.file_name() else {
                 continue;
             };
+            if name.to_str().is_some_and(|name| excluded.contains(name)) {
+                continue;
+            }
             let destination = target_dir.join(name);
             let activity = last_activity(&source);
             match best.get(&destination) {
@@ -150,6 +164,13 @@ pub struct SyncedAccount {
     /// Last reconciled archive state, independent from transcript activity.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub canonical_session_archives: BTreeMap<String, bool>,
+    /// The Code sidebar (groups and view mode) each `<account>/<org>` scope
+    /// showed the last time a switch observed it — the three-way baseline.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sidebar_scopes: BTreeMap<String, super::sidebar::SidebarState>,
+    /// Last reconciled sidebar, duplicated in every row like the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_sidebar: Option<super::sidebar::SidebarState>,
 }
 
 /// What every account held after the last merge, keyed by account UUID. The

@@ -229,10 +229,56 @@ pub fn plan_merge(
     Ok(result)
 }
 
+/// The app's per-folder load hint: which index ids are archived, so their
+/// full records can be loaded lazily. The flags in the indexes stay the source
+/// of truth, but a hint that disagrees with rewritten flags defers the wrong
+/// chats, so it is regenerated wherever it already exists.
+pub const ARCHIVED_HINT: &str = "archived-sessions.idx";
+
+/// `(path, bytes)` to bring `dir`'s hint in line with the flags on disk, or
+/// `None` when the folder has no hint or it is already right. Its layout is
+/// the app's own: `{"v":1,"archived":[sorted ids]}`.
+pub fn archived_hint_rewrite(dir: &Path) -> Option<(PathBuf, Vec<u8>)> {
+    let path = dir.join(ARCHIVED_HINT);
+    let current = std::fs::read(&path).ok()?;
+    let mut archived: Vec<String> = local_session_files(dir)
+        .iter()
+        .filter(|index| load_document(index).is_some_and(|(_, flag)| flag == Some(true)))
+        .filter_map(|index| Some(index.file_stem()?.to_str()?.to_string()))
+        .collect();
+    archived.sort();
+    // Same member order as the app's writer, so an unchanged hint is
+    // byte-identical and left alone.
+    let bytes = format!(
+        r#"{{"v":1,"archived":{}}}"#,
+        serde_json::to_string(&archived).ok()?
+    )
+    .into_bytes();
+    (bytes != current).then_some((path, bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::merge::{current_state, plan_session_merge};
     use super::*;
+
+    #[test]
+    fn the_archived_hint_is_regenerated_only_where_it_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "A/O", Some(true), 10);
+        assert_eq!(archived_hint_rewrite(&root.join("A/O")), None);
+        std::fs::write(
+            root.join("A/O").join(ARCHIVED_HINT),
+            r#"{"v":1,"archived":[]}"#,
+        )
+        .unwrap();
+        let (path, bytes) = archived_hint_rewrite(&root.join("A/O")).unwrap();
+        assert_eq!(path, root.join("A/O").join(ARCHIVED_HINT));
+        assert_eq!(bytes, br#"{"v":1,"archived":["local_chat"]}"#);
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(archived_hint_rewrite(&root.join("A/O")), None);
+    }
 
     fn write(root: &Path, scope: &str, flag: Option<bool>, activity: i64) {
         let path = root.join(scope).join("local_chat.json");

@@ -30,6 +30,22 @@ See [the artifact investigation](claude-artifact-investigation.md) for the
 format-specific findings and the distinction between source preservation and
 hosted artifact continuity.
 
+Follow-up on 2026-09-17: the bundled Claude Code CLI has a fixed table of
+reasons a comment monitor cannot resume, each with its own wording —
+`other_org` ("in another of your organizations"), `not_editor`,
+`held_by_live_session`, `held_by_job`, `watch_cap`, `stop_latched`,
+`recorded_stop`, `record_incomplete`, `auto_replies_disabled`,
+`stale_handoff`, `comments_unavailable`, `holder_unknown`, `arm_in_flight`.
+The notice in the screenshot ("it couldn't restart in this session") is the
+default branch, reached when the artifact's boot request fails outright
+(`boot_failed` / `not_found` / no subscription token) rather than by any
+recognised policy. That is the expected outcome for an artifact published by a
+different *account*: the resumed session is signed in as tmakhlay2 and has no
+access to it. Nothing local can supply that access; the recovery is to open
+the conversation under the publishing account (the monitor re-arms there) or
+to publish the preserved source again under the new account, which creates a
+new artifact and URL.
+
 ### A paused routine becomes enabled
 
 Three independent defects interact:
@@ -67,46 +83,61 @@ migration markers. The fix preserves the target document's remaining fields.
 
 ### Projects disappear and chats move to Ungrouped
 
-This is a different storage layer from conversation history. Inspection of the
-installed Claude application source shows that Code sidebar groups are stored
-in the renderer's `dframe-store`, under `customGroupsByScope`, keyed by
-`accountUuid/orgUuid`. A scope contains:
+Follow-up on 2026-09-17, reading every saved browser snapshot with a LevelDB
+reader (the `.ldb` tables are Snappy-compressed, so plain string searches of
+the earlier pass were not evidence of absence).
 
-- group IDs and names;
-- assignments from keys such as `code:local_<session-id>` to group IDs;
-- ordered chat keys within groups.
+The Code sidebar is the renderer's `dframe-store` `localStorage` entry, a
+zustand store persisted per browser profile — that is, per Switchboard
+account snapshot. Custom groups (shown as projects) live in
+`customGroupsByScope["<account>/<org>"]` as `{groups, assignments, order}`;
+the grouping and sorting mode live in top-level `groupByByMode` /
+`sortByByMode`. Assignment keys are `code:local_<session-id>`.
 
-Claude also mirrors group scopes under
-`claude_desktop_config.json` → `preferences.epitaxyPrefs` →
-`dframe-group-scopes`, and has server synchronization for groups. Its renderer
-keeps existing target scopes rather than unconditionally replacing them from
-that mirror. The inspected live mirror is empty.
+What the snapshots hold:
 
-Switchboard unions `local_*.json` chat indexes, then replaces Chromium stores
-with the incoming account's saved stores. It never merges the source group
-definitions or assignments into the target account/organization scope. The
-result is exactly the observed shape: chats arrive, their group associations
-do not, and Claude places them in Ungrouped.
+- **gamers.cccp** (outgoing before the incident): `groupByByMode.code =
+  "project"` — the sidebar was grouped by *folder*, which the app derives from
+  each chat's working directory. Its scope has no custom groups. This is what
+  the user saw as their projects.
+- **tmakhlay2** (incoming): `groupByByMode.code = "custom"` with four custom
+  group definitions and **no assignments**, in every snapshot that has this
+  scope — including the archive taken on 2026-09-08 before the first switch.
+  Its last rendered row counts show all recent chats under `custom-ungrouped`
+  and zero rows per group.
 
-The local project-cloning feature in PR #5 is a separate operation. Its project
-membership support does not synchronize these native Claude sidebar groups
-during account switching.
+So nothing was lost at the incident switch. The incoming account's saved store
+brought back its own view mode ("custom") together with four long-empty groups,
+while the outgoing account's folder grouping is a per-account preference that
+was not carried. Every merged chat therefore landed under Ungrouped. No
+assignment of a local chat to a custom group exists in any local snapshot; if
+those four groups ever had members, it predates the earliest snapshot and is
+not recoverable from local data.
 
-**A backend-only fix is feasible, but requires a dedicated storage adapter.**
-It must read and update only the relevant `dframe-store` scope while Claude is
-stopped, reconcile group definitions, assignments, explicit removals, and order
-using a baseline, keep the preference mirror consistent, and account for
-Claude's server refresh. It must preserve the target account's other browser
-state and provide rollback for both stores. Tests must cover existing empty
-target scopes, A→B→C, rename/move/delete conflicts, and a renderer/server refresh.
+Two app behaviours matter for a fix:
 
-Changing only the preference mirror would not fix existing target scopes.
-Copying the whole outgoing browser store would also copy authentication and
-account-specific state. Neither is a valid shortcut. This investigation does
-not implement the group adapter or establish whether every previous group
-definition remains recoverable in saved browser snapshots. No Switchboard UI
-change is inherently required; cloud Claude Projects and their permissions
-would require separate treatment from these local Code sidebar groups.
+- Group definitions and the view fields are synced to the server per
+  organisation (`/api/claude_code/organizations/<org>/user_settings`, entry
+  `ccd/dframe-store`). On reconcile after launch, a differing server copy
+  replaces local group definitions and drops local assignments whose group is
+  not on the server. A local edit survives only when the app's own marker
+  `ccd-sync-pending:ccd/dframe-store` holds the current `<account>/<org>`
+  identity, in which case the local state is pushed instead. Assignments of
+  `code:local_*` chats are never uploaded.
+- The main process mirrors non-empty scopes to `claude_desktop_config.json` →
+  `preferences.epitaxyPrefs.dframe-group-scopes` and merges that mirror into
+  the store on hydration (adopting absent scopes wholesale; for present scopes
+  only assignments to existing groups).
+
+**Implemented** on `codex/claude-sidebar-tombstones`: a LevelDB adapter for
+the renderer's `localStorage` (pure Rust, staged copy, read-back verification,
+swap into place), a baseline-driven reconciliation of the sidebar across
+accounts (groups persist until deleted; a total wipe is not trusted as a
+deletion), the pending-edit marker so the server keeps the merged result, the
+mirror kept consistent, and sync-record fields for the baselines. Stores
+written this way were read back by upstream LevelDB (Node `classic-level`)
+with every original entry intact. Cloud Claude Projects are unrelated to these
+local sidebar groups.
 
 ### Archived chats become unarchived
 
@@ -126,6 +157,27 @@ content, retaining organization-specific observations and a reconciled archive
 baseline. The newest resume data must survive while a known archive or
 unarchive edit follows A→B→C. Without historical evidence, conflicting copies
 should remain archived until an explicit unarchive establishes new intent.
+
+The app also keeps a per-folder `archived-sessions.idx` load hint
+(`{"v":1,"archived":[ids]}`) used to defer loading archived records. The
+follow-up regenerates it from the reconciled flags wherever it exists.
+
+### Deleted chats return
+
+Claude Desktop records every user deletion as a `deleted_<id>` marker file
+(content: deletion time in ms) beside the account/org session indexes, for the
+session's local id and each CLI transcript id it owned, and consults the
+signed-in account's markers before re-adopting a transcript from
+`~/.claude/projects/`. The inspected store holds 44 markers; 12 chats with a
+marker in one account still have index copies in all four org folders — the
+history merge handed them back, and the app's marker check does not cover
+another account's folder.
+
+**Implemented**: markers are the recorded intent, so a switch removes the index
+from every account without a prompt and copies the marker into every
+account/org folder. An index created after the marker's time (a deliberate
+re-import) supersedes it and is kept. The existing prompt remains for indexes
+that vanished without a marker.
 
 ## Delivery boundary
 
@@ -151,7 +203,14 @@ legacy organization baselines, state flushed during quit, stale deletion
 confirmation, capture seeding, and the observed native artifact URL format.
 
 Before calling a future release installed, verify its bundled helper contains
-the intended fixes. Before calling the project-group defect fixed, implement
-and verify the scoped storage adapter described above. Restoring access to the
-same hosted artifact and comment monitor additionally depends on supported
-Claude account permissions; silently republishing is a different operation.
+the intended fixes. Restoring access to the same hosted artifact and comment
+monitor additionally depends on supported Claude account permissions; silently
+republishing is a different operation.
+
+The sidebar and deleted-chat follow-up on `codex/claude-sidebar-tombstones`
+adds the `rusty-leveldb` crate (pure Rust) and is covered by synthetic tests
+for the LevelDB round trip, the reconciliation rules, marker handling, and the
+load hint. It has not yet been exercised against a live Claude launch; the
+first real switch should be followed by confirming that the sidebar shows the
+carried grouping mode and that the app's server sync keeps it (the
+`ccd-sync-pending:ccd/dframe-store` marker clears once pushed).
