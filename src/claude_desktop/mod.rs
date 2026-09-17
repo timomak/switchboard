@@ -22,8 +22,11 @@
 pub mod app;
 mod artifacts;
 pub mod capture;
+pub mod local_storage;
 pub mod merge;
 pub mod session_state;
+pub mod sidebar;
+pub mod tombstones;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -317,6 +320,13 @@ pub struct SwitchPlan {
     /// Baseline used to plan this switch. Apply combines it with the actual
     /// post-write state so unresolved definitions remain unresolved safely.
     pub prior_synced: merge::Synced,
+    /// Chats the app's own deletion markers say are gone: removed from every
+    /// account, markers copied everywhere, no prompt.
+    pub tombstones: tombstones::Sweep,
+    /// The Code sidebar to install for the target, when it can be carried.
+    pub sidebar: Option<sidebar::SidebarPlan>,
+    /// Why the sidebar is not carried, when it is not.
+    pub sidebar_note: Option<String>,
 }
 
 /// Decide the whole switch without performing any of it.
@@ -341,9 +351,16 @@ pub fn plan_switch(paths: &Paths, label: &str, opts: SwitchOpts) -> Result<Switc
 
     let sessions_root = paths.sessions_root();
     let synced = load_synced(&paths.synced_path());
+    let markers = tombstones::scan(&sessions_root);
+    let verdict = tombstones::verdict(&sessions_root, &markers);
     let (sessions, scheduled) = match &target.org_uuid {
         Some(org) => (
-            merge::plan_session_merge(&sessions_root, &target.account_uuid, org),
+            merge::plan_session_merge_excluding(
+                &sessions_root,
+                &target.account_uuid,
+                org,
+                &verdict.doomed,
+            ),
             Some(merge::plan_scheduled_merge(
                 &sessions_root,
                 &target.account_uuid,
@@ -353,7 +370,13 @@ pub fn plan_switch(paths: &Paths, label: &str, opts: SwitchOpts) -> Result<Switc
         ),
         None => (SessionMerge::default(), None),
     };
-    let deletions = merge::deletion_candidates(&sessions_root, &synced);
+    // A chat with a deletion marker is not a question for the user: the app
+    // recorded the answer when they deleted it.
+    let mut deletions = merge::deletion_candidates(&sessions_root, &synced);
+    deletions.retain(|candidate| {
+        candidate.kind != merge::ConflictKind::Chat || !verdict.doomed.contains(&candidate.id)
+    });
+    let tombstone_sweep = tombstones::plan_sweep(&sessions_root, &markers, &verdict);
     let session_state = match &target.org_uuid {
         Some(org) => session_state::plan_merge(
             &sessions_root,
@@ -370,6 +393,15 @@ pub fn plan_switch(paths: &Paths, label: &str, opts: SwitchOpts) -> Result<Switc
 
     let outgoing = active_account_uuid(&paths.config_json())
         .and_then(|uuid| label_for_uuid(&profiles, &uuid).map(str::to_string));
+    let outgoing_profile = outgoing
+        .as_deref()
+        .and_then(|label| profiles.iter().find(|profile| profile.label == label));
+    // Best effort by design: the sidebar is carried when both stores can be
+    // read, and the switch proceeds as before when they cannot.
+    let (sidebar, sidebar_note) = match sidebar::plan(paths, &target, outgoing_profile, &synced) {
+        Ok(plan) => (plan, None),
+        Err(error) => (None, Some(format!("sidebar state not carried: {error}"))),
+    };
 
     let profile_dir = paths.profile_dir(label);
     let token_cache = std::fs::read_to_string(profile_dir.join(TOKEN_CACHE)).map_err(|_| {
@@ -417,6 +449,9 @@ pub fn plan_switch(paths: &Paths, label: &str, opts: SwitchOpts) -> Result<Switc
         deletions,
         confirmed_deletions: BTreeSet::new(),
         prior_synced: synced,
+        tombstones: tombstone_sweep,
+        sidebar,
+        sidebar_note,
     })
 }
 
@@ -540,6 +575,8 @@ fn apply_switch_while_stopped(
     // sitting in another account hands it back on the next switch and the same
     // prompt returns forever. Runs after the merge so it also strips anything
     // the merge just re-added.
+    // Folders whose membership or flags change get their load hint refreshed.
+    let mut touched: BTreeSet<PathBuf> = BTreeSet::new();
     match merge::plan_deletion_sweep(&paths.sessions_root(), &plan.confirmed_deletions) {
         Ok(sweep) => {
             for (path, bytes) in sweep.rewrites {
@@ -555,11 +592,12 @@ fn apply_switch_while_stopped(
             // confirmed chat stops following you between accounts without the
             // conversation itself being destroyed.
             for path in sweep.removals {
-                if let Err(error) = std::fs::remove_file(&path) {
-                    notes.push(format!(
+                match std::fs::remove_file(&path) {
+                    Ok(()) => touched.extend(path.parent().map(Path::to_path_buf)),
+                    Err(error) => notes.push(format!(
                         "could not remove {}: {error}",
                         sanitize_untrusted_path(&path)
-                    ));
+                    )),
                 }
             }
         }
@@ -593,9 +631,62 @@ fn apply_switch_while_stopped(
             Err(error) => notes.push(format!("name convergence skipped: {error}")),
         }
     }
+    // Chats the user deleted in the app leave every account, and the app's own
+    // markers follow them so no account's import scan adopts the transcript
+    // again. Runs after the merge so it also strips anything just re-added.
+    for path in &plan.tombstones.removals {
+        match std::fs::remove_file(path) {
+            Ok(()) => {
+                touched.extend(path.parent().map(Path::to_path_buf));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => notes.push(format!(
+                "could not remove deleted chat {}: {error}",
+                sanitize_untrusted_path(path)
+            )),
+        }
+    }
+    for (path, bytes) in &plan.tombstones.writes {
+        if let Err(error) = crate::cache::atomic_write(path, bytes) {
+            notes.push(format!(
+                "could not record deletion marker {}: {error}",
+                sanitize_untrusted_path(path)
+            ));
+        }
+    }
+    let chats_removed = plan.tombstones.chats();
+    if chats_removed > 0 {
+        notes.push(format!(
+            "removed {chats_removed} deleted chat(s) from every account (transcripts kept)"
+        ));
+    }
+    // Every folder whose archive flags or membership changed gets its load
+    // hint regenerated, so the app never defers the wrong chats.
+    if let Some(org) = &plan.target.org_uuid {
+        touched.insert(
+            paths
+                .sessions_root()
+                .join(&plan.target.account_uuid)
+                .join(org),
+        );
+    }
+    for dir in touched {
+        if let Some((path, bytes)) = session_state::archived_hint_rewrite(&dir)
+            && let Err(error) = crate::cache::atomic_write(&path, &bytes)
+        {
+            notes.push(format!(
+                "could not refresh {}: {error}",
+                sanitize_untrusted_path(&path)
+            ));
+        }
+    }
     // Record what every account holds now, so the next switch can tell an
     // intentional deletion from a task that account simply never received.
     let mut synced = merge::current_state(&paths.sessions_root());
+    // The folders know nothing about the sidebar; its baselines carry forward
+    // so a third account's last observation survives the switches between
+    // the other two.
+    sidebar::carry_baselines(&plan.prior_synced, &mut synced);
     let mut canonical = plan
         .scheduled
         .as_ref()
@@ -645,6 +736,35 @@ fn apply_switch_while_stopped(
     swap_credentials(&live_config, &plan.tokens, &plan.target.account_uuid)?;
 
     restore_desktop_state(paths, &plan.target.label)?;
+
+    // The restored browser state is the target's own; now carry the sidebar
+    // into it. Best effort: the account is already switched, so a failure
+    // here is a note, never a rollback.
+    if let Some(note) = &plan.sidebar_note {
+        notes.push(note.clone());
+    }
+    if let Some(sidebar_plan) = &plan.sidebar {
+        let installed = match sidebar::apply(paths, sidebar_plan, notes) {
+            Ok(true) => {
+                notes.push(format!(
+                    "carried {} sidebar group(s), {} chat assignment(s) and the view mode",
+                    sidebar_plan.groups(),
+                    sidebar_plan.assignments()
+                ));
+                true
+            }
+            Ok(false) => true,
+            Err(error) => {
+                notes.push(format!("sidebar state not carried: {error}"));
+                false
+            }
+        };
+        let mut synced = load_synced(&paths.synced_path());
+        sidebar::record(&mut synced, sidebar_plan, installed);
+        if let Err(error) = save_synced(&paths.synced_path(), &synced) {
+            notes.push(format!("could not record the sidebar sync: {error}"));
+        }
+    }
 
     if !plan.opts.keep_bridge {
         let bridge = paths.data_dir.join(BRIDGE_FILE);
@@ -727,6 +847,7 @@ fn merge_history_into(
     // than an ambiguous first observation on the next switch.
     if fully_seeded && let Some(scheduled) = scheduled {
         let mut next = merge::current_state(&sessions_root);
+        sidebar::carry_baselines(&synced, &mut next);
         merge::set_canonical_routines(&mut next, &scheduled.canonical_routines);
         merge::set_canonical_routine_enabled(&mut next, &scheduled.canonical_enabled);
         session_state::set_canonical(&mut next, &archive_state.canonical_archives);
@@ -1028,7 +1149,7 @@ fn copy_file(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn remove_if_present(path: &Path) -> Result<()> {
+pub(super) fn remove_if_present(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => {
             std::fs::remove_dir_all(path).map_err(|e| AppError::io_at(path, e))
@@ -1064,7 +1185,7 @@ fn replace_dir(source: &Path, destination: &Path) -> Result<()> {
     copy_dir(source, destination)
 }
 
-fn copy_dir(source: &Path, destination: &Path) -> Result<()> {
+pub(super) fn copy_dir(source: &Path, destination: &Path) -> Result<()> {
     std::fs::create_dir_all(destination).map_err(|e| AppError::io_at(destination, e))?;
     let entries = std::fs::read_dir(source).map_err(|e| AppError::io_at(source, e))?;
     for entry in entries.flatten() {
@@ -1299,6 +1420,145 @@ mod tests {
 
         assert_eq!(session_count(&sessions_root, &profiles[0]), 2);
         assert_eq!(session_count(&sessions_root, &profiles[1]), 0);
+    }
+
+    /// The outgoing account groups by project and has one custom group with a
+    /// chat in it; the target is in custom mode with a stale empty group and
+    /// deleted a chat the outgoing account still holds.
+    #[test]
+    fn a_switch_carries_the_sidebar_and_honours_deletion_markers() {
+        let fixture = fixture();
+        let data = fixture.paths.data_dir.clone();
+        let sessions = data.join(SESSIONS_DIR);
+        std::fs::remove_dir_all(data.join("Local Storage")).unwrap();
+        local_storage::seed_for_tests(
+            &local_storage::leveldb_dir(&data),
+            &[
+                ("ccd-sync-owner", "uuid-here"),
+                (
+                    sidebar::STORE_KEY,
+                    r#"{"state":{"collapsed":false,"groupByByMode":{"code":"project"},"customGroupsByScope":{"uuid-here/org-1":{"groups":[{"id":"cg-1","name":"Alpha"}],"assignments":{"code:local_x":"cg-1"},"order":{"cg-1":["code:local_x"]}}},"lastSidebarScopeKey":"uuid-here/org-1"},"version":1}"#,
+                ),
+            ],
+        );
+        let there_state = fixture.paths.profile_dir("there").join(DESKTOP_STATE);
+        std::fs::remove_dir_all(there_state.join("Local Storage")).unwrap();
+        local_storage::seed_for_tests(
+            &local_storage::leveldb_dir(&there_state),
+            &[(
+                sidebar::STORE_KEY,
+                r#"{"state":{"groupByByMode":{"code":"custom"},"customGroupsByScope":{"uuid-there/org-2":{"groups":[{"id":"cg-old","name":"Stale"}],"assignments":{},"order":{}}}},"version":1}"#,
+            )],
+        );
+        write(
+            &sessions.join("uuid-here/org-1/local_gone.json"),
+            r#"{"lastActivityAt":10,"createdAt":10,"cliSessionId":"cli-gone"}"#,
+        );
+        write(&sessions.join("uuid-there/org-2/deleted_gone"), "999");
+        write(
+            &sessions.join("uuid-there/org-2/archived-sessions.idx"),
+            r#"{"v":1,"archived":["local_gone"]}"#,
+        );
+        write(
+            &data.join("claude_desktop_config.json"),
+            r#"{"preferences":{"epitaxyPrefs":{"dframe-group-scopes":{}}}}"#,
+        );
+
+        let plan = plan_switch(&fixture.paths, "there", SwitchOpts::default()).unwrap();
+        assert_eq!(plan.tombstones.chats(), 1);
+        assert!(
+            plan.sessions
+                .copied
+                .iter()
+                .all(|(source, _)| !source.ends_with("local_gone.json")),
+            "{:?}",
+            plan.sessions
+        );
+        assert!(plan.deletions.is_empty(), "{:?}", plan.deletions);
+        let carried = plan.sidebar.as_ref().expect("sidebar planned");
+        assert!(carried.changed);
+        assert_eq!(carried.groups(), 2, "{carried:?}");
+        assert_eq!(carried.assignments(), 1);
+        assert_eq!(carried.group_by().as_deref(), Some("project"));
+
+        let app = Recorder::default();
+        let notes = apply_switch(&fixture.paths, &plan, &app).unwrap();
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("carried 2 sidebar group(s)")),
+            "{notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("removed 1 deleted chat(s)")),
+            "{notes:?}"
+        );
+
+        // The deleted chat left both accounts and its marker reached the other.
+        assert!(!sessions.join("uuid-here/org-1/local_gone.json").exists());
+        assert!(!sessions.join("uuid-there/org-2/local_gone.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(sessions.join("uuid-here/org-1/deleted_gone")).unwrap(),
+            "999"
+        );
+        assert_eq!(
+            std::fs::read_to_string(sessions.join("uuid-there/org-2/archived-sessions.idx"))
+                .unwrap(),
+            r#"{"v":1,"archived":[]}"#
+        );
+
+        // The live store is the target's, with the reconciled scope, the
+        // outgoing view mode, and the app's pending-edit marker.
+        let scratch = tempfile::tempdir().unwrap();
+        let entries =
+            local_storage::read(&local_storage::leveldb_dir(&data), scratch.path()).unwrap();
+        assert_eq!(entries[sidebar::PENDING_KEY], "uuid-there/org-2");
+        let store: serde_json::Value = serde_json::from_str(&entries[sidebar::STORE_KEY]).unwrap();
+        assert_eq!(store["state"]["groupByByMode"]["code"], "project");
+        let scope = &store["state"]["customGroupsByScope"]["uuid-there/org-2"];
+        assert_eq!(scope["assignments"]["code:local_x"], "cg-1");
+        assert_eq!(scope["order"]["cg-1"][0], "code:local_x");
+        let names: Vec<&str> = scope["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|group| group["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["Stale", "Alpha"]);
+        assert!(
+            !entries.contains_key("ccd-sync-owner"),
+            "the target's own store must not inherit the outgoing owner"
+        );
+
+        let config: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(data.join("claude_desktop_config.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            config["preferences"]["epitaxyPrefs"]["dframe-group-scopes"]["uuid-there/org-2"]["assignments"]
+                ["code:local_x"],
+            "cg-1"
+        );
+
+        let synced = load_synced(&fixture.paths.synced_path());
+        assert_eq!(
+            synced["uuid-there"].sidebar_scopes["uuid-there/org-2"],
+            carried.state
+        );
+        assert_eq!(
+            synced["uuid-here"].sidebar_scopes["uuid-here/org-1"].assignments["code:local_x"],
+            "cg-1"
+        );
+        assert_eq!(sidebar::canonical(&synced), Some(carried.state.clone()));
+        // The outgoing snapshot kept its own store byte-for-byte readable.
+        let saved = local_storage::read(
+            &local_storage::leveldb_dir(&fixture.paths.profile_dir("here").join(DESKTOP_STATE)),
+            scratch.path(),
+        )
+        .unwrap();
+        assert_eq!(saved["ccd-sync-owner"], "uuid-here");
     }
 
     #[test]

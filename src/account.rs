@@ -815,6 +815,26 @@ fn plan_lines(plan: &SwitchPlan) -> Vec<String> {
             out.push("  history         skipped (no org recorded for this account yet)".to_string())
         }
     }
+    let deleted_chats = plan.tombstones.chats();
+    if deleted_chats > 0 {
+        out.push(format!(
+            "  deleted chats   {deleted_chats} removed from every account (deleted in Claude; transcripts kept)"
+        ));
+    }
+    match (&plan.sidebar, &plan.sidebar_note) {
+        (Some(sidebar), _) if sidebar.changed => out.push(format!(
+            "  sidebar         carry {} group(s), {} chat assignment(s){}",
+            sidebar.groups(),
+            sidebar.assignments(),
+            sidebar
+                .group_by()
+                .map(|mode| format!(", grouped by {mode}"))
+                .unwrap_or_default()
+        )),
+        (Some(_), _) => out.push("  sidebar         already in step".to_string()),
+        (None, Some(note)) => out.push(format!("  sidebar         {note}")),
+        (None, None) => {}
+    }
     out.push("  credential      swap to the saved Desktop login".to_string());
     out.push(format!(
         "  browser state   {}",
@@ -1213,6 +1233,9 @@ mod tests {
             deletions: Vec::new(),
             confirmed_deletions: Default::default(),
             prior_synced: Default::default(),
+            tombstones: Default::default(),
+            sidebar: None,
+            sidebar_note: None,
         }
     }
 
