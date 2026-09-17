@@ -186,10 +186,10 @@ use different OAuth clients, so each identity must be captured separately.
 
 ### Switch Claude Desktop
 
-Before switching, ai-usagebar merges local history into the target profile.
-Session indexes use the newest copy; routines and schedules are merged by id.
-It then quits Desktop, swaps the credential and browser state, and reopens the
-app.
+Switchboard previews the history merge, quits Desktop, and recomputes the merge
+after shutdown so newly saved changes are included. It then merges history,
+swaps the credential and browser state, and reopens the app. Deletion decisions
+are retained only while their observed account topology remains unchanged.
 
 Every switch creates a rollback archive in `~/.claude-acc/backups/`:
 
@@ -249,10 +249,24 @@ pending `deletion_conflicts`; pass the returned opaque key through
 `--delete-conflict <key>`. Keys are scoped by item type, so a routine id cannot
 authorize deletion of a chat with the same id.
 
-Chats reconcile by `lastActivityAt`. Routines use a per-task three-way
-baseline. Concurrent edits to the same routine keep both local copies and are
-reported as a conflict. Edit the preferred copy again to resolve it on the next
-switch.
+Chat resume content reconciles by `lastActivityAt`; archive state reconciles
+separately because Claude does not advance that timestamp when archiving or
+unarchiving. Routine baselines retain each organization separately. Independent
+field edits can merge, and enabled state reconciles separately from execution
+bookkeeping. Conflicting changes to the same other routine field retain local
+copies and remain reported as a conflict.
+
+When old copies disagree without a trustworthy baseline, the merge keeps the
+chat archived or routine paused. A later explicit unarchive or resume is tracked
+and can propagate; these states do not permanently override new user edits.
+New baseline fields are additive to the existing profile-store format.
+
+Claude Code sidebar groups and their chat assignments are not reconciled by
+account switching. They live in a separate account/organization-scoped browser
+store, so copied chats can appear under Ungrouped. The project-cloning feature
+does not fix native Claude group continuity. See the
+[state investigation](claude-switch-state-investigation.md) for the required
+backend storage work and artifact limitations.
 
 Account removal and chat filters (`only` / `reset`) are not implemented. Remove
 a profile directory manually. Cowork sessions stay with the

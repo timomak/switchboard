@@ -64,6 +64,14 @@ Each release is also published at
 
 ### Fixed
 
+- Claude Desktop switches now reconcile routine pause state and chat archive
+  flags separately from execution/activity updates, retain organization-scoped
+  baselines, and refresh the merge after shutdown. Schedule merges preserve
+  target registry metadata. Native sidebar group synchronization remains a
+  documented limitation.
+- Artifact source preservation now accepts Claude's native short artifact URLs
+  as well as the older code-artifact URLs.
+
 - Claude Desktop handoff now resolves workspace symlinks, repairs older cloned
   sessions without changing their IDs, and shows interactive trust/setup prompts
   in Terminal. Project cloning reports per-chat progress and supports Back and Stop.

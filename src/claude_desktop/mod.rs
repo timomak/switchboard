@@ -23,6 +23,7 @@ pub mod app;
 mod artifacts;
 pub mod capture;
 pub mod merge;
+pub mod session_state;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -294,6 +295,7 @@ pub struct SwitchPlan {
     /// The account being switched away from, when it is one we manage.
     pub outgoing: Option<String>,
     pub sessions: SessionMerge,
+    pub session_state: session_state::SessionStateMerge,
     /// Absent when the target has no known org yet, so there is no history
     /// folder to merge into.
     pub scheduled: Option<ScheduledMerge>,
@@ -352,6 +354,19 @@ pub fn plan_switch(paths: &Paths, label: &str, opts: SwitchOpts) -> Result<Switc
         None => (SessionMerge::default(), None),
     };
     let deletions = merge::deletion_candidates(&sessions_root, &synced);
+    let session_state = match &target.org_uuid {
+        Some(org) => session_state::plan_merge(
+            &sessions_root,
+            &target.account_uuid,
+            org,
+            &synced,
+            &sessions,
+        )?,
+        None => session_state::SessionStateMerge {
+            canonical_archives: session_state::canonical_archives(&synced),
+            ..Default::default()
+        },
+    };
 
     let outgoing = active_account_uuid(&paths.config_json())
         .and_then(|uuid| label_for_uuid(&profiles, &uuid).map(str::to_string));
@@ -395,6 +410,7 @@ pub fn plan_switch(paths: &Paths, label: &str, opts: SwitchOpts) -> Result<Switc
         target,
         outgoing,
         sessions,
+        session_state,
         scheduled,
         tokens,
         opts,
@@ -411,7 +427,6 @@ pub fn plan_switch(paths: &Paths, label: &str, opts: SwitchOpts) -> Result<Switc
 /// from that archive before relaunching.
 pub fn apply_switch(paths: &Paths, plan: &SwitchPlan, app: &dyn AppControl) -> Result<Vec<String>> {
     let mut notes = Vec::new();
-    let members: Vec<&str> = plan.archive_members.iter().map(String::as_str).collect();
 
     // Stop before archiving so SQLite/LevelDB and config.json are quiescent.
     if let Err(error) = app.quit() {
@@ -428,6 +443,37 @@ pub fn apply_switch(paths: &Paths, plan: &SwitchPlan, app: &dyn AppControl) -> R
     }
     let mut archived = false;
     let mut result = (|| {
+        // Planning happens while Claude is running (and may precede a user
+        // confirmation). Its shutdown can flush routine edits, archive flags,
+        // and new sessions. Recompute against those final bytes before writing
+        // history or taking the rollback snapshot.
+        let mut stopped_plan = plan_switch(paths, &plan.target.label, plan.opts.clone())?;
+        if stopped_plan.target.account_uuid != plan.target.account_uuid
+            || stopped_plan.target.org_uuid != plan.target.org_uuid
+        {
+            return Err(AppError::Other(
+                "the target Claude profile changed while switching; retry the switch".into(),
+            ));
+        }
+        stopped_plan.archive.clone_from(&plan.archive);
+        let current_deletions: BTreeSet<_> = stopped_plan
+            .deletions
+            .iter()
+            .map(merge::DeletionCandidate::key)
+            .collect();
+        stopped_plan.confirmed_deletions = plan
+            .confirmed_deletions
+            .intersection(&current_deletions)
+            .cloned()
+            .collect();
+        if stopped_plan.confirmed_deletions != plan.confirmed_deletions {
+            notes.push("kept items whose deletion state changed while Claude quit".into());
+        }
+        let members: Vec<&str> = stopped_plan
+            .archive_members
+            .iter()
+            .map(String::as_str)
+            .collect();
         if !members.is_empty() {
             app.archive(&plan.archive, &paths.data_dir, &members)?;
             archived = true;
@@ -441,7 +487,7 @@ pub fn apply_switch(paths: &Paths, plan: &SwitchPlan, app: &dyn AppControl) -> R
         }
         // Best effort: local content protection must never block an account switch.
         artifacts::preserve(paths);
-        apply_switch_while_stopped(paths, plan, &mut notes)
+        apply_switch_while_stopped(paths, &stopped_plan, &mut notes)
     })();
 
     if result.is_err()
@@ -483,6 +529,9 @@ fn apply_switch_while_stopped(
     // history never arrived.
     for (source, destination) in plan.sessions.copied.iter().chain(&plan.sessions.updated) {
         copy_file(source, destination)?;
+    }
+    for (destination, bytes) in &plan.session_state.rewrites {
+        crate::cache::atomic_write(destination, bytes)?;
     }
     if let Some(scheduled) = &plan.scheduled {
         crate::cache::atomic_write(&scheduled.target, &scheduled.bytes)?;
@@ -563,6 +612,20 @@ fn apply_switch_while_stopped(
         .collect();
     canonical.retain(|id, _| present.contains(id));
     merge::set_canonical_routines(&mut synced, &canonical);
+    let mut enabled = plan
+        .scheduled
+        .as_ref()
+        .map(|scheduled| scheduled.canonical_enabled.clone())
+        .unwrap_or_else(|| merge::canonical_routine_enabled(&plan.prior_synced));
+    enabled.retain(|id, _| {
+        present.contains(id)
+            && !plan
+                .confirmed_deletions
+                .iter()
+                .any(|key| key.kind == merge::ConflictKind::Routine && key.id == *id)
+    });
+    merge::set_canonical_routine_enabled(&mut synced, &enabled);
+    session_state::set_canonical(&mut synced, &plan.session_state.canonical_archives);
     if let Err(error) = save_synced(&paths.synced_path(), &synced) {
         notes.push(format!("could not record the schedule sync: {error}"));
     }
@@ -610,34 +673,69 @@ fn merge_history_into(
 ) -> (usize, usize) {
     let sessions_root = paths.sessions_root();
     let sessions = merge::plan_session_merge(&sessions_root, account_uuid, org_uuid);
+    let synced = load_synced(&paths.synced_path());
+    let archive_state =
+        match session_state::plan_merge(&sessions_root, account_uuid, org_uuid, &synced, &sessions)
+        {
+            Ok(state) => state,
+            Err(error) => {
+                notes.push(format!("history seed skipped: {error}"));
+                return (0, 0);
+            }
+        };
     let mut copied = 0;
+    let mut fully_seeded = true;
     for (source, destination) in sessions.copied.iter().chain(&sessions.updated) {
         match copy_file(source, destination) {
             Ok(()) => copied += 1,
-            Err(error) => notes.push(format!(
-                "could not seed {}: {error}",
-                sanitize_untrusted_path(destination)
-            )),
+            Err(error) => {
+                fully_seeded = false;
+                notes.push(format!(
+                    "could not seed {}: {error}",
+                    sanitize_untrusted_path(destination)
+                ));
+            }
         }
     }
-    let routines = match merge::plan_scheduled_merge(
-        &sessions_root,
-        account_uuid,
-        org_uuid,
-        &load_synced(&paths.synced_path()),
-    ) {
-        Ok(scheduled) => match crate::cache::atomic_write(&scheduled.target, &scheduled.bytes) {
-            Ok(()) => scheduled.added + scheduled.updated,
+    for (destination, bytes) in &archive_state.rewrites {
+        if let Err(error) = crate::cache::atomic_write(destination, bytes) {
+            fully_seeded = false;
+            notes.push(format!("could not seed chat archive state: {error}"));
+        }
+    }
+    let scheduled =
+        match merge::plan_scheduled_merge(&sessions_root, account_uuid, org_uuid, &synced) {
+            Ok(scheduled) => {
+                match crate::cache::atomic_write(&scheduled.target, &scheduled.bytes) {
+                    Ok(()) => Some(scheduled),
+                    Err(error) => {
+                        notes.push(format!("schedule seed skipped: {error}"));
+                        None
+                    }
+                }
+            }
             Err(error) => {
                 notes.push(format!("schedule seed skipped: {error}"));
-                0
+                None
             }
-        },
-        Err(error) => {
-            notes.push(format!("schedule seed skipped: {error}"));
-            0
+        };
+    let routines = scheduled
+        .as_ref()
+        .map_or(0, |merge| merge.added + merge.updated);
+    // Capture is another successful history merge. Record its observations so
+    // an immediate unarchive/resume in the new account is a known edit, rather
+    // than an ambiguous first observation on the next switch.
+    if fully_seeded && let Some(scheduled) = scheduled {
+        let mut next = merge::current_state(&sessions_root);
+        merge::set_canonical_routines(&mut next, &scheduled.canonical_routines);
+        merge::set_canonical_routine_enabled(&mut next, &scheduled.canonical_enabled);
+        session_state::set_canonical(&mut next, &archive_state.canonical_archives);
+        if let Err(error) = save_synced(&paths.synced_path(), &next) {
+            notes.push(format!(
+                "could not record the captured history sync: {error}"
+            ));
         }
-    };
+    }
     (copied, routines)
 }
 
@@ -1016,6 +1114,33 @@ mod tests {
         steps: RefCell<Vec<&'static str>>,
     }
 
+    struct QuitWrites {
+        recorder: Recorder,
+        writes: Vec<(PathBuf, String)>,
+    }
+
+    impl AppControl for QuitWrites {
+        fn quit(&self) -> Result<()> {
+            self.recorder.quit()?;
+            for (path, contents) in &self.writes {
+                write(path, contents);
+            }
+            Ok(())
+        }
+
+        fn relaunch(&self) -> Result<()> {
+            self.recorder.relaunch()
+        }
+
+        fn archive(&self, archive: &Path, root: &Path, members: &[&str]) -> Result<()> {
+            self.recorder.archive(archive, root, members)
+        }
+
+        fn restore(&self, archive: &Path, root: &Path, members: &[&str]) -> Result<()> {
+            self.recorder.restore(archive, root, members)
+        }
+    }
+
     impl AppControl for QuitFailure {
         fn quit(&self) -> Result<()> {
             self.steps.borrow_mut().push("quit");
@@ -1244,6 +1369,233 @@ mod tests {
     }
 
     #[test]
+    fn a_pause_and_new_session_flushed_on_quit_reach_the_target() {
+        let fixture = fixture();
+        let sessions = fixture.paths.sessions_root();
+        let enabled = r#"{"scheduledTasks":[{"id":"t1","createdAt":1,"enabled":true}]}"#;
+        let paused = r#"{"scheduledTasks":[{"id":"t1","createdAt":1,"enabled":false}]}"#;
+        let here = sessions.join("uuid-here/org-1/scheduled-tasks.json");
+        let there = sessions.join("uuid-there/org-2/scheduled-tasks.json");
+        write(&here, enabled);
+        write(&there, enabled);
+        save_synced(
+            &fixture.paths.synced_path(),
+            &merge::current_state(&sessions),
+        )
+        .unwrap();
+        let plan = plan_switch(&fixture.paths, "there", SwitchOpts::default()).unwrap();
+        let app = QuitWrites {
+            recorder: Recorder::default(),
+            writes: vec![
+                (here, paused.into()),
+                (
+                    sessions.join("uuid-here/org-1/local_flushed.json"),
+                    r#"{"lastActivityAt":600,"isArchived":true}"#.into(),
+                ),
+            ],
+        };
+
+        apply_switch(&fixture.paths, &plan, &app).unwrap();
+
+        let tasks: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(there).unwrap()).unwrap();
+        assert_eq!(tasks["scheduledTasks"][0]["enabled"], false);
+        assert!(
+            sessions
+                .join("uuid-there/org-2/local_flushed.json")
+                .is_file()
+        );
+        let synced = load_synced(&fixture.paths.synced_path());
+        assert_eq!(
+            synced["uuid-there"].routine_definitions["t1"]["enabled"],
+            false
+        );
+        assert_eq!(app.recorder.steps().last().unwrap(), "relaunch");
+    }
+
+    #[test]
+    fn pause_and_archive_state_survive_two_switches_and_explicit_reversal() {
+        let fixture = fixture();
+        let paths = &fixture.paths;
+        let sessions = paths.sessions_root();
+        write(
+            &paths.profile_dir("third").join(META_JSON),
+            r#"{"accountUuid":"uuid-third","orgUuid":"org-3"}"#,
+        );
+        write(&paths.profile_dir("third").join(TOKEN_CACHE), "third-a");
+        write(&paths.profile_dir("third").join(TOKEN_CACHE_V2), "third-b");
+        write(
+            &paths
+                .profile_dir("third")
+                .join(DESKTOP_STATE)
+                .join("Cookies"),
+            "third-cookies",
+        );
+        let scopes = ["uuid-here/org-1", "uuid-there/org-2", "uuid-third/org-3"];
+        for scope in scopes {
+            write(
+                &sessions.join(scope).join("scheduled-tasks.json"),
+                r#"{"scheduledTasks":[{"id":"t1","createdAt":1,"enabled":true,"lastRunAt":10}]}"#,
+            );
+            write(
+                &sessions.join(scope).join("local_x.json"),
+                r#"{"lastActivityAt":500,"isArchived":false}"#,
+            );
+        }
+        save_synced(&paths.synced_path(), &merge::current_state(&sessions)).unwrap();
+        write(
+            &sessions.join(scopes[0]).join("scheduled-tasks.json"),
+            r#"{"scheduledTasks":[{"id":"t1","createdAt":1,"enabled":false,"lastRunAt":10}]}"#,
+        );
+        write(
+            &sessions.join(scopes[1]).join("scheduled-tasks.json"),
+            r#"{"scheduledTasks":[{"id":"t1","createdAt":1,"enabled":true,"lastRunAt":20}]}"#,
+        );
+        write(
+            &sessions.join(scopes[0]).join("local_x.json"),
+            r#"{"lastActivityAt":500,"isArchived":true}"#,
+        );
+        write(
+            &sessions.join(scopes[1]).join("local_x.json"),
+            r#"{"lastActivityAt":600,"isArchived":false,"cliSessionId":"newer-resume"}"#,
+        );
+        let read = |scope: &str, name: &str| -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(sessions.join(scope).join(name)).unwrap())
+                .unwrap()
+        };
+        for (target, scope) in [("there", scopes[1]), ("third", scopes[2])] {
+            let plan = plan_switch(paths, target, SwitchOpts::default()).unwrap();
+            apply_switch(paths, &plan, &Recorder::default()).unwrap();
+            assert_eq!(
+                read(scope, "scheduled-tasks.json")["scheduledTasks"][0]["enabled"],
+                false
+            );
+            let chat = read(scope, "local_x.json");
+            assert_eq!(chat["isArchived"], true);
+            assert_eq!(chat["cliSessionId"], "newer-resume");
+        }
+
+        let mut tasks = read(scopes[2], "scheduled-tasks.json");
+        tasks["scheduledTasks"][0]["enabled"] = true.into();
+        write(
+            &sessions.join(scopes[2]).join("scheduled-tasks.json"),
+            &tasks.to_string(),
+        );
+        let mut chat = read(scopes[2], "local_x.json");
+        chat["isArchived"] = false.into();
+        write(
+            &sessions.join(scopes[2]).join("local_x.json"),
+            &chat.to_string(),
+        );
+        let plan = plan_switch(paths, "here", SwitchOpts::default()).unwrap();
+        apply_switch(paths, &plan, &Recorder::default()).unwrap();
+        assert_eq!(
+            read(scopes[0], "scheduled-tasks.json")["scheduledTasks"][0]["enabled"],
+            true
+        );
+        assert_eq!(read(scopes[0], "local_x.json")["isArchived"], false);
+    }
+
+    #[test]
+    fn capture_seeding_records_a_baseline_for_an_immediate_unarchive_and_resume() {
+        let fixture = fixture();
+        let paths = &fixture.paths;
+        let sessions = paths.sessions_root();
+        write(
+            &sessions.join("uuid-here/org-1/local_x.json"),
+            r#"{"lastActivityAt":500,"isArchived":true}"#,
+        );
+        write(
+            &sessions.join("uuid-here/org-1/scheduled-tasks.json"),
+            r#"{"scheduledTasks":[{"id":"t1","createdAt":1,"enabled":false}]}"#,
+        );
+        let mut notes = Vec::new();
+        merge_history_into(paths, "uuid-there", "org-2", &mut notes);
+        assert!(notes.is_empty(), "{notes:?}");
+        let baseline = load_synced(&paths.synced_path());
+        assert_eq!(
+            baseline["uuid-there"].session_archive_states["org-2"]["local_x.json"],
+            Some(true)
+        );
+        write(
+            &sessions.join("uuid-there/org-2/local_x.json"),
+            r#"{"lastActivityAt":500,"isArchived":false}"#,
+        );
+        write(
+            &sessions.join("uuid-there/org-2/scheduled-tasks.json"),
+            r#"{"scheduledTasks":[{"id":"t1","createdAt":1,"enabled":true}]}"#,
+        );
+        merge_history_into(paths, "uuid-here", "org-1", &mut notes);
+        assert!(notes.is_empty(), "{notes:?}");
+        let updated = load_synced(&paths.synced_path());
+        assert_eq!(
+            updated["uuid-here"].session_archive_states["org-1"]["local_x.json"],
+            Some(false)
+        );
+        assert_eq!(
+            updated["uuid-here"].routine_definitions_by_org["org-1"]["t1"]["enabled"],
+            true
+        );
+    }
+
+    #[test]
+    fn a_target_profile_changed_on_quit_aborts_and_relaunches() {
+        let fixture = fixture();
+        let plan = plan_switch(&fixture.paths, "there", SwitchOpts::default()).unwrap();
+        let before = std::fs::read(fixture.paths.config_json()).unwrap();
+        let app = QuitWrites {
+            recorder: Recorder::default(),
+            writes: vec![(
+                fixture.paths.profile_dir("there").join(META_JSON),
+                r#"{"accountUuid":"uuid-replaced","orgUuid":"org-2"}"#.into(),
+            )],
+        };
+        let error = apply_switch(&fixture.paths, &plan, &app).unwrap_err();
+        assert!(error.to_string().contains("target Claude profile changed"));
+        assert_eq!(std::fs::read(fixture.paths.config_json()).unwrap(), before);
+        assert_eq!(app.recorder.steps(), ["quit", "relaunch"]);
+    }
+
+    #[test]
+    fn a_deletion_undone_on_quit_is_not_swept_from_other_accounts() {
+        let fixture = fixture();
+        let sessions = fixture.paths.sessions_root();
+        let here = sessions.join("uuid-here/org-1/scheduled-tasks.json");
+        let there = sessions.join("uuid-there/org-2/scheduled-tasks.json");
+        let task = r#"{"scheduledTasks":[{"id":"t1","createdAt":1}]}"#;
+        write(&there, task);
+        save_synced(
+            &fixture.paths.synced_path(),
+            &merge::current_state(&sessions),
+        )
+        .unwrap();
+        write(&here, r#"{"scheduledTasks":[]}"#);
+        let mut plan = plan_switch(&fixture.paths, "there", SwitchOpts::default()).unwrap();
+        plan.confirmed_deletions = plan
+            .deletions
+            .iter()
+            .map(merge::DeletionCandidate::key)
+            .collect();
+        assert_eq!(plan.confirmed_deletions.len(), 1);
+        let app = QuitWrites {
+            recorder: Recorder::default(),
+            writes: vec![(here.clone(), task.into())],
+        };
+
+        let notes = apply_switch(&fixture.paths, &plan, &app).unwrap();
+        for registry in [here, there] {
+            let tasks: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(registry).unwrap()).unwrap();
+            assert_eq!(tasks["scheduledTasks"][0]["id"], "t1");
+        }
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("deletion state changed"))
+        );
+    }
+
+    #[test]
     fn switch_preserves_artifacts_but_planning_does_not() {
         let fixture = fixture();
         let id = "11111111-1111-4111-8111-111111111111";
@@ -1320,6 +1672,16 @@ mod tests {
         write(
             &sessions.join("uuid-there/org-2/scheduled-tasks.json"),
             r#"{"scheduledTasks":[{"id":"t1","createdAt":1},{"id":"t2","createdAt":2}]}"#,
+        );
+
+        save_synced(
+            &fixture.paths.synced_path(),
+            &merge::current_state(&sessions),
+        )
+        .unwrap();
+        write(
+            &sessions.join("uuid-here/org-1/scheduled-tasks.json"),
+            r#"{"scheduledTasks":[]}"#,
         );
 
         let mut plan = plan_switch(&fixture.paths, "there", SwitchOpts::default()).unwrap();

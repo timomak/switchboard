@@ -26,6 +26,18 @@ struct Frame {
     url: String,
 }
 
+fn is_artifact_url(url: &str) -> bool {
+    if let Some(id) = url.strip_prefix("https://claude.ai/code/artifact/") {
+        return uuid::Uuid::parse_str(id).is_ok();
+    }
+    // Current native frame-link records use a short, opaque sharing token;
+    // it is not the artifact UUID stored in tool results and monitor state.
+    // Accept the observed 22-character token on the exact HTTPS host. This
+    // does not make a network request or change the artifact's permissions.
+    url.strip_prefix("https://claude.ai/artifact/")
+        .is_some_and(|token| token.len() == 22 && token.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
 // Never follow directory symlinks while discovering indexes/transcripts/copies.
 fn children(path: &Path) -> Vec<PathBuf> {
     if !fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) {
@@ -255,11 +267,7 @@ fn preserve_inner(paths: &Paths) -> io::Result<()> {
                 if frame.kind != "frame-link" || frame.session_id != id {
                     continue;
                 }
-                let Some(artifact_id) = frame.url.strip_prefix("https://claude.ai/code/artifact/")
-                else {
-                    continue;
-                };
-                if uuid::Uuid::parse_str(artifact_id).is_err() {
+                if !is_artifact_url(&frame.url) {
                     continue;
                 }
                 // Individual missing/unreadable files must not prevent other snapshots.
@@ -277,6 +285,7 @@ mod tests {
     use super::*;
     const SESSION: &str = "11111111-1111-4111-8111-111111111111";
     const URL: &str = "https://claude.ai/code/artifact/22222222-2222-4222-8222-222222222222";
+    const SHORT_URL: &str = "https://claude.ai/artifact/AbCdEf0123456789GhIjKl";
 
     fn fixture() -> (tempfile::TempDir, Paths, PathBuf, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
@@ -346,6 +355,68 @@ mod tests {
                     & 0o777,
                 0o600
             );
+        }
+    }
+
+    #[test]
+    fn preserves_native_short_url_frames_without_changing_monitor_state() {
+        let (_temp, paths, source, transcript) = fixture();
+        let original_source = fs::read(&source).unwrap();
+        let frame = serde_json::json!({
+            "type": "frame-link",
+            "sessionId": SESSION,
+            "path": source,
+            "frameUrl": SHORT_URL,
+            "artifactCount": 1,
+            "title": "Sample artifact",
+            "timestamp": "2026-01-01T00:00:00Z"
+        });
+        let monitor = serde_json::json!({
+            "type": "artifact-comment-monitor",
+            "sessionId": SESSION,
+            "v": 1,
+            "artifacts": {"22222222-2222-4222-8222-222222222222": {
+                "state": "stopped", "writtenAtMs": 1, "title": "Sample artifact"
+            }}
+        });
+        let original = format!("{frame}\n{monitor}\n");
+        fs::write(&transcript, &original).unwrap();
+        preserve(&paths);
+        preserve(&paths);
+        let saved = copies(&paths);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(
+            fs::read(saved[0].join("artifact.html")).unwrap(),
+            original_source
+        );
+        assert_eq!(fs::read(&source).unwrap(), original_source);
+        assert_eq!(fs::read_to_string(&transcript).unwrap(), original);
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(saved[0].join("metadata.json")).unwrap()).unwrap();
+        assert_eq!(metadata["source_url"], SHORT_URL);
+    }
+
+    #[test]
+    fn short_url_frames_reject_other_origins_and_non_token_suffixes() {
+        let (_temp, paths, source, transcript) = fixture();
+        for url in [
+            SHORT_URL.replace("https://", "http://"),
+            SHORT_URL.replace("claude.ai", "claude.ai.example.com"),
+            SHORT_URL.replace("claude.ai", "claude.ai@example.com"),
+            SHORT_URL.replace("claude.ai", "example.com@claude.ai"),
+            "https://claude.ai/artifact/".into(),
+            "https://claude.ai/artifact/../private".into(),
+            "https://claude.ai/artifact/%2e%2e".into(),
+            format!("{SHORT_URL}/extra"),
+            format!("{SHORT_URL}?token=secret"),
+            format!("{SHORT_URL}#fragment"),
+            format!("https://claude.ai/artifact/{}", "a".repeat(21)),
+            format!("https://claude.ai/artifact/{}", "a".repeat(23)),
+            format!("https://claude.ai/artifact/{}-", "a".repeat(21)),
+        ] {
+            fs::write(&transcript, record(&source).replace(URL, &url)).unwrap();
+            preserve(&paths);
+            assert!(copies(&paths).is_empty(), "unexpected snapshot for {url}");
         }
     }
 
