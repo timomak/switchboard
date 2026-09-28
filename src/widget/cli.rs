@@ -137,6 +137,11 @@ pub struct Cli {
 
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Sync selected personal skills and MCP setups through iCloud.
+    LibrarySync {
+        #[command(subcommand)]
+        action: crate::library_sync::Action,
+    },
     /// Sync native Codex and Claude chat histories between Macs through iCloud.
     ChatSync {
         #[command(subcommand)]

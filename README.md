@@ -10,6 +10,7 @@ Claude and Codex accounts, within reach. Switchboard is a native macOS menu bar 
 - Manage saved accounts and API connections from Settings.
 - [Continue a conversation in another app](docs/continue-in-another-app.md) by cloning supported local chat histories into independent native sessions.
 - [Sync chats between Macs](docs/chat-sync.md) through iCloud, with shared account history inside Codex and Claude and separate histories between the apps.
+- [Sync personal skills and MCP setups](docs/tools-skills-sync.md) through iCloud, with separate Codex, Claude Code and Cowork destinations.
 - [Clone a local folder project](docs/clone-project.md) into separate chats with optional file copying and resumable batch results.
 
 Switchboard is independent of Anthropic and OpenAI.
@@ -54,6 +55,7 @@ cargo test --locked --lib codex_provider::
 cargo test --locked --lib claude_connection::
 cargo test --locked --lib claude_desktop::capture::
 cargo test --locked --lib chat_sync::
+cargo test --locked --lib library_sync::
 ./macos/run-tests.sh
 ```
 
