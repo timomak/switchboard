@@ -137,6 +137,11 @@ pub struct Cli {
 
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Sync native Codex and Claude chat histories between Macs through iCloud.
+    ChatSync {
+        #[command(subcommand)]
+        action: crate::chat_sync::Action,
+    },
     /// Stage and verify cloud providers without changing Codex.
     CodexProvider {
         #[command(subcommand)]

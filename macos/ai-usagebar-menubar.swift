@@ -1829,6 +1829,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.title = "5h …"
         buildMenu()
         configureSwitchboard()
+        board.chatSync.start { [weak self] in self?.accountSwitchInFlight != false }
         rebuildVendorSubmenu()
         observeAppearanceChanges()
         lastVendor = VENDOR  // so the first settingsChanged isn't mistaken for a swap

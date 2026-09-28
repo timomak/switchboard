@@ -306,9 +306,10 @@ organisation that published them; see the
 [state investigation](claude-switch-state-investigation.md).
 
 Account removal and chat filters (`only` / `reset`) are not implemented. Remove
-a profile directory manually. Cowork sessions stay with the
-account that created them because their transcript path contains the account
-UUID.
+a profile directory manually. Ordinary account switching keeps Cowork sessions
+in their account-specific native folders. The separate [Chat sync](chat-sync.md)
+feature can restore native Cowork history across existing account scopes and
+between Macs while keeping authentication local.
 
 Profile-format compatibility attribution is recorded in
 [third-party notices](../THIRD_PARTY_NOTICES.md).

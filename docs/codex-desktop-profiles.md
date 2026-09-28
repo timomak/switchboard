@@ -28,7 +28,9 @@ Codex home (`~/.codex` by default). The switcher never copies, removes or merges
 Codex session transcripts, project configuration, databases, or automation
 definitions. Local availability in the app still depends on the official
 client and the selected account's permissions; this does not transfer cloud
-account ownership or subscription entitlements.
+account ownership or subscription entitlements. The separate
+[Chat sync](chat-sync.md) feature transfers native local history between Macs;
+it does not change this login-only switching behavior.
 
 Requires macOS, the official Codex desktop app, a Codex executable supporting
 `app-server --stdio`, and file-backed ChatGPT authentication. API-key accounts

@@ -7,6 +7,9 @@ use clap::Parser;
 
 fn main() {
     let cli = Cli::parse();
+    if let Some(Command::ChatSync { action }) = &cli.command {
+        std::process::exit(ai_usagebar::chat_sync::run(action));
+    }
     if let Some(Command::Account { action }) = &cli.command {
         std::process::exit(ai_usagebar::account::run(action));
     }

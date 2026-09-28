@@ -785,12 +785,78 @@ struct TestRunner {
         testAccountStatus()
         testSystemIntegrations()
         testSwitchboardRequests()
+        testChatSync()
         if failures > 0 {
             print("\n\(failures) test(s) FAILED")
             exit(1)
         }
         print("\nall tests passed")
     }
+}
+
+func testChatSync() {
+    let data = Data(#"{"enabled":true,"available":true,"device_id":"fixture-mac","last_sync_at":"2026-09-28T12:00:00Z","accounts":[{"id":"codex","provider":"codex","label":"Codex","state":"ready","exported":3,"imported":2},{"id":"claude","provider":"claude","label":"Claude","state":"waiting","detail":"Quit Claude to restore chats."}],"pending":2,"conflicts":1}"#.utf8)
+    let status = parseChatSyncStatus(data)!
+    assertEqual(status.accounts?.map { $0.id }, ["codex", "claude"], "sync keeps provider rows separate")
+    assertEqual(status.accounts?.last?.statusLabel, "Waiting", "sync shows deferred restore state")
+    assertEqual(status.pending, 2, "sync retains deferred restoration count")
+    assertEqual(status.conflicts, 1, "sync retains preserved conflict count")
+    assertEqual(status.deviceID, "fixture-mac", "sync parses backend snake-case identity")
+    assertNotNil(chatSyncDate("2026-09-28T12:00:00Z"), "sync date accepts whole seconds")
+    assertNotNil(chatSyncDate("2026-09-28T12:00:00.123Z"), "sync date accepts fractional seconds")
+    assertNil(parseChatSyncStatus(Data(#"{"available":true}"#.utf8)), "missing enable state cannot activate sync")
+    assertNil(parseChatSyncStatus(Data(#"{"enabled":"true","available":true}"#.utf8)), "invalid enable state cannot activate sync")
+    assertEqual(chatSyncCanRun(status, preview: false, accountOperation: false), true, "enabled sync can run")
+    assertEqual(chatSyncCanRun(status, preview: true, accountOperation: false), false, "preview never syncs")
+    assertEqual(chatSyncCanRun(status, preview: false, accountOperation: true), false, "account switching defers automatic sync")
+    assertEqual(chatSyncCanRun(nil, preview: false, accountOperation: false), false, "unknown setting never syncs")
+    let unavailable = ChatSyncStatus(enabled: true, available: false)
+    assertEqual(chatSyncCanRun(unavailable, preview: false, accountOperation: false), false, "missing iCloud defers sync")
+
+    // Execute a synthetic enable/status/disable cycle with no filesystem or app
+    // access. This checks the authorization boundary, not just JSON decoding.
+    final class Fixture {
+        let lock = NSLock()
+        private var calls: [String] = []
+        private var enabled = false
+        var commands: [String] { lock.lock(); defer { lock.unlock() }; return calls }
+        func execute(_ command: String) -> ChatSyncCommandResult {
+            lock.lock(); defer { lock.unlock() }
+            calls.append(command)
+            if command == "enable" { enabled = true }
+            if command == "disable" { enabled = false }
+            return ChatSyncCommandResult(data: Data("{\"enabled\":\(enabled),\"available\":true}".utf8))
+        }
+    }
+    func waitForResult(_ model: ChatSyncModel) {
+        let deadline = Date().addingTimeInterval(2)
+        while model.busy && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        assertEqual(model.busy, false, "fixture command completes")
+    }
+    let fixture = Fixture()
+    let model = ChatSyncModel(preview: false, execute: fixture.execute)
+    model.refresh(); waitForResult(model)
+    model.syncNow()
+    assertEqual(fixture.commands, ["status"], "opening disabled sync and sync-now cannot upload")
+    model.setEnabled(true); waitForResult(model)
+    assertEqual(fixture.commands, ["status", "enable", "run"], "explicit enable starts first sync")
+    model.refresh(); waitForResult(model)
+    assertEqual(fixture.commands.last, "status", "opening enabled sync remains read-only")
+    model.setEnabled(false); waitForResult(model)
+    model.refresh(thenSync: true); waitForResult(model)
+    assertEqual(fixture.commands.suffix(2), ["disable", "status"], "automatic pass respects disabled backend setting")
+    let previewFixture = Fixture()
+    let preview = ChatSyncModel(status: status, preview: true, execute: previewFixture.execute)
+    preview.setEnabled(false); preview.syncNow()
+    assertEqual(previewFixture.commands, [], "preview blocks all sync mutations")
+    let failed = ChatSyncModel(status: status, preview: false, execute: { _ in
+        ChatSyncCommandResult(data: Data(#"{"enabled":false,"available":false,"message":"The sync folder is unavailable."}"#.utf8), succeeded: false)
+    })
+    failed.syncNow(); waitForResult(failed)
+    assertEqual(failed.status?.enabled, true, "failed command cannot silently disable displayed sync setting")
+    assertEqual(failed.message, "The sync folder is unavailable.", "safe backend error reaches sync UI")
 }
 
 func testSwitchboardRequests() {
