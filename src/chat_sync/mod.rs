@@ -2,7 +2,7 @@
 //! remain local; iCloud carries immutable, provider-specific session packages.
 pub mod claude;
 pub mod codex;
-mod engine;
+pub(crate) mod engine;
 #[cfg(test)]
 mod engine_tests;
 
@@ -338,7 +338,7 @@ fn process_is_provider(command: &str, provider: Provider) -> bool {
     }
 }
 
-fn provider_stopped(provider: Provider) -> Result<bool> {
+pub(crate) fn provider_stopped(provider: Provider) -> Result<bool> {
     if !cfg!(target_os = "macos") {
         return Err(error("Native chat sync is available on macOS."));
     }

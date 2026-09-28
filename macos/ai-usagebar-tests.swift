@@ -786,6 +786,7 @@ struct TestRunner {
         testSystemIntegrations()
         testSwitchboardRequests()
         testChatSync()
+        testLibrarySync()
         if failures > 0 {
             print("\n\(failures) test(s) FAILED")
             exit(1)
@@ -857,6 +858,102 @@ func testChatSync() {
     failed.syncNow(); waitForResult(failed)
     assertEqual(failed.status?.enabled, true, "failed command cannot silently disable displayed sync setting")
     assertEqual(failed.message, "The sync folder is unavailable.", "safe backend error reaches sync UI")
+}
+
+func testLibrarySync() {
+    let data = Data(#"{"available":true,"sync_skills":true,"sync_mcp":false,"inventory":[{"id":"fixture-skill","name":"Review notes","kind":"skill","origin":"Codex","classification":"custom","supported_targets":["codex","claude_code","cowork"]},{"id":"fixture-plugin","name":"Plugin skill","kind":"skill","classification":"plugin_managed","supported_targets":[]}],"items":[{"id":"fixture-managed","name":"Review notes","kind":"skill","enabled":true,"targets":["codex","cowork"],"state":"conflict","destinations":[{"target":"codex","state":"waiting_for_app","detail":"Close Codex to install."}],"conflicts":[{"revision":"fixture-revision","label":"Other Mac"}]}],"cowork":{"state":"update_available","exported_version":"2.0.0","installed_version":"1.0.0"}}"#.utf8)
+    let status = parseLibrarySyncStatus(data)!
+    let candidate = status.inventory![0], managed = status.items![0]
+    assertEqual(status.syncSkills, true, "library parses independent skills toggle")
+    assertEqual(status.syncMCP, false, "library parses independent MCP toggle")
+    assertEqual(candidate.supportedTargets, [.codex, .claudeCode, .cowork], "library decodes separate native destinations")
+    assertEqual(status.cowork?.markedInstalled, false, "old Cowork confirmation does not confirm a new export")
+    let outdated = LibraryCoworkStatus(state: "update_available", exportedVersion: "1.0.0", installedVersion: "1.0.0")
+    assertEqual(outdated.markedInstalled, false, "an outdated export cannot show confirmed even when the previous import versions match")
+    assertEqual(libraryTargetArgument([.cowork, .claudeCode, .codex]), "codex,claude-code,cowork", "library serializes explicit destinations for CLI")
+    assertNil(parseLibrarySyncStatus(Data(#"{"available":true,"sync_skills":true}"#.utf8)), "missing MCP choice never activates library")
+    assertEqual(librarySyncCanRun(skills: false, mcp: true, available: true, preview: false, accountOperation: false), true, "MCP can sync independently of skills")
+    assertEqual(librarySyncCanRun(skills: true, mcp: true, available: true, preview: false, accountOperation: true), false, "account switching pauses both library kinds")
+
+    final class Fixture {
+        let lock = NSLock()
+        private var calls: [[String]] = []
+        private var value: [String: Any]
+        init(_ data: Data) { value = try! JSONSerialization.jsonObject(with: data) as! [String: Any] }
+        var commands: [[String]] { lock.lock(); defer { lock.unlock() }; return calls }
+        func execute(_ args: [String]) -> LibrarySyncCommandResult {
+            lock.lock(); defer { lock.unlock() }
+            calls.append(args)
+            if ["enable", "disable"].contains(args[0]) {
+                value[args.last == "skills" ? "sync_skills" : "sync_mcp"] = args[0] == "enable"
+            }
+            if args[0] == "confirm-cowork" {
+                var cowork = value["cowork"] as! [String: Any]
+                cowork["installed_version"] = args.last
+                cowork["state"] = "confirmed"
+                value["cowork"] = cowork
+            }
+            var response = value
+            if args[0] != "inventory" { response.removeValue(forKey: "inventory") }
+            return LibrarySyncCommandResult(data: try! JSONSerialization.data(withJSONObject: response))
+        }
+    }
+    func waitForResult(_ model: LibrarySyncModel) {
+        let deadline = Date().addingTimeInterval(2)
+        while model.busy && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        assertEqual(model.busy, false, "library fixture command completes")
+    }
+    let fixture = Fixture(data)
+    let model = LibrarySyncModel(preview: false, execute: fixture.execute)
+    model.refresh(inventory: true); waitForResult(model)
+    assertEqual(fixture.commands, [["inventory"]], "opening enabled library inventory remains read-only")
+    model.adopt(candidate, targets: [])
+    model.adopt(status.inventory![1], targets: [.codex])
+    model.resolve(managed, revision: "not-a-candidate")
+    assertEqual(fixture.commands.count, 1, "adoption needs selected destinations and personal ownership; conflicts need known revision")
+    model.adopt(candidate, targets: [.codex, .claudeCode]); waitForResult(model)
+    assertEqual(Array(fixture.commands.suffix(2)), [["adopt", "fixture-skill", "--targets", "codex,claude-code"], ["run"]], "explicit adoption sends only selected targets before sync")
+    assertEqual(model.status?.inventory?.count, 2, "status without inventory retains read-only discovery results")
+    model.setEnabled(kind: "mcp", enabled: true); waitForResult(model)
+    assertEqual(model.status?.syncSkills, true, "enabling MCP preserves skills choice")
+    assertEqual(model.status?.syncMCP, true, "explicit MCP enable applies")
+    model.setEnabled(kind: "skill", enabled: false); waitForResult(model)
+    assertEqual(model.status?.syncMCP, true, "disabling skills preserves MCP choice")
+    let beforeDisabledAdopt = fixture.commands.count
+    model.adopt(candidate, targets: [.codex])
+    assertEqual(fixture.commands.count, beforeDisabledAdopt, "disabled kind cannot be adopted through UI")
+    model.setEnabled(kind: "mcp", enabled: false); waitForResult(model)
+    model.refresh(thenSync: true); waitForResult(model)
+    assertEqual(fixture.commands.last, ["status"], "minute pass cannot run when both toggles are off")
+    model.exportCowork(); waitForResult(model)
+    model.confirmCowork(); waitForResult(model)
+    assertEqual(fixture.commands.last, ["confirm-cowork", "--version", "2.0.0"], "Cowork confirmation records the displayed export version")
+    assertEqual(model.status?.cowork?.markedInstalled, true, "Cowork tracks user confirmation separately from export")
+    var emptiedStatus = status
+    emptiedStatus.items = []
+    let emptied = LibrarySyncModel(status: emptiedStatus, preview: false, execute: fixture.execute)
+    emptied.exportCowork(); waitForResult(emptied)
+    assertEqual(fixture.commands.last, ["export-cowork"], "last Cowork removal can export an empty replacement of a previous plugin")
+
+    let previewFixture = Fixture(data)
+    let preview = LibrarySyncModel(status: status, preview: true, execute: previewFixture.execute)
+    preview.setEnabled(kind: "skill", enabled: false); preview.syncNow()
+    preview.adopt(candidate, targets: [.codex]); preview.setTargets(managed, targets: [.claudeCode])
+    preview.setItemEnabled(managed, enabled: false); preview.remove(managed)
+    preview.resolve(managed, revision: "fixture-revision"); preview.exportCowork(); preview.confirmCowork()
+    assertEqual(previewFixture.commands, [], "preview blocks every library mutation")
+
+    let pausedFixture = Fixture(data)
+    let paused = LibrarySyncModel(status: status, preview: false, execute: pausedFixture.execute)
+    paused.start { true }; waitForResult(paused)
+    paused.setEnabled(kind: "skill", enabled: false); paused.syncNow(); paused.remove(managed)
+    assertEqual(pausedFixture.commands, [["status"]], "account operation permits initial status but blocks library mutations")
+    let failed = LibrarySyncModel(status: status, preview: false, execute: { _ in
+        LibrarySyncCommandResult(data: Data(#"{"message":"Close Codex before installing."}"#.utf8), succeeded: false)
+    })
+    failed.syncNow(); waitForResult(failed)
+    assertEqual(failed.status?.syncSkills, true, "failed library command preserves the last known toggle state")
+    assertEqual(failed.message, "Close Codex before installing.", "library shows only safe JSON error messages")
 }
 
 func testSwitchboardRequests() {

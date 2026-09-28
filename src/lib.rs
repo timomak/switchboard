@@ -38,6 +38,7 @@ pub mod jwt;
 pub mod kilo;
 pub mod kimi;
 pub mod kiro;
+pub mod library_sync;
 pub mod minimax;
 pub mod moonshot;
 pub mod nous;

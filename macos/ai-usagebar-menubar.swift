@@ -1830,6 +1830,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         buildMenu()
         configureSwitchboard()
         board.chatSync.start { [weak self] in self?.accountSwitchInFlight != false }
+        board.librarySync.start { [weak self] in self?.accountSwitchInFlight != false }
         rebuildVendorSubmenu()
         observeAppearanceChanges()
         lastVendor = VENDOR  // so the first settingsChanged isn't mistaken for a swap
