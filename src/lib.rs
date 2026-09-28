@@ -15,6 +15,7 @@ pub mod anthropic_api;
 pub mod antigravity;
 pub mod cache;
 pub mod catalog;
+pub mod chat_sync;
 pub mod claude_connection;
 pub mod claude_desktop;
 pub mod cli_session;

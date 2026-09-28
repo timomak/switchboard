@@ -11,6 +11,11 @@ Each release is also published at
 
 ### Added
 
+- Sync local Codex and Claude Cowork history between Macs through iCloud Drive.
+  Each app shares history across accounts while keeping sign-ins local and the
+  two apps separate. Native restoration preserves independent edits as forks,
+  waits for apps to close, and recovers interrupted transfers.
+
 - Carry the Claude Code sidebar across Desktop account switches: custom groups
   (projects), their chat assignments, and the grouping/sorting mode are
   reconciled from the outgoing account's edits and written into the incoming
