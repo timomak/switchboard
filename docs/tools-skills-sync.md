@@ -82,7 +82,14 @@ Environment references must be available to the Switchboard backend. Existing
 destination-native credentials take precedence. The binding command applies to
 configured homes of the selected app; configure an account directly in its native
 client when it needs a distinct value. Setup requirements expose slot names, not
-secret values or source file contents.
+secret values or source file contents. Bindings belong to the selected library
+item, destination configuration and slot, so different MCP servers cannot share
+or overwrite one another's bindings.
+
+Older destination-only bindings are kept locally but are not assigned to a
+server automatically. Existing values in that server's native configuration are
+preserved. If a required value is missing, the destination reports **Needs setup**;
+run `library-sync bind` again for that item and slot, then retry sync.
 
 Local settings, receipts, ownership records, recovery journals and Cowork ZIPs
 live under `~/Library/Application Support/Switchboard Library`, outside iCloud.

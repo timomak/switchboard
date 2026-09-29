@@ -52,6 +52,11 @@ fn hash(bytes: &[u8]) -> String {
 fn opaque(parts: &[&str]) -> String {
     hash(parts.join("\0").as_bytes())
 }
+/// Local binding identity follows the item across renames, and stays separate
+/// for every native account/configuration destination and slot.
+pub(super) fn binding_key(item_id: &str, locator: &str, slot: &str) -> String {
+    format!("item:{}:{slot}", opaque(&[item_id, locator]))
+}
 fn outcome(status: InstallStatus, detail: &str, applied: bool) -> ApplyResult {
     ApplyResult {
         status,
@@ -919,15 +924,30 @@ impl Adapter for NativeAdapter<'_> {
         };
         let mut remote = false;
         let native = if item.active() {
-            let prefix = format!("{locator}:");
-            let bindings = self
-                .bindings
+            let slots = mcp::binding_slots(definition)?;
+            let bindings = slots
                 .iter()
-                .filter_map(|(k, v)| k.strip_prefix(&prefix).map(|slot| (slot.into(), v.clone())))
+                .filter_map(|slot| {
+                    self.bindings
+                        .get(&binding_key(&item.id, locator, slot))
+                        .map(|value| (slot.clone(), value.clone()))
+                })
                 .collect();
-            let rendered = mcp::render(definition, target, entry, &bindings)?;
+            // Old destination-only keys have no item ownership. Keep them in
+            // settings, but never guess which server they belonged to. The
+            // renderer can safely retain a value already in this server's
+            // native entry; missing values require an explicit item binding.
+            let mut rendered = mcp::render(definition, target, entry, &bindings)?;
             remote = rendered.remote;
             if rendered.native.is_none() {
+                if slots
+                    .iter()
+                    .any(|slot| self.bindings.contains_key(&format!("{locator}:{slot}")))
+                {
+                    rendered.requirements.push(
+                        "Rebind this item's missing local slots; older bindings were shared between MCP setups and cannot be assigned safely.".into(),
+                    );
+                }
                 return Ok(outcome(
                     InstallStatus::NeedsSetup,
                     &rendered.requirements.join(" "),
@@ -1114,6 +1134,245 @@ mod tests {
             InstallStatus::Conflict
         );
     }
+    fn local_mcp(name: &str) -> LibraryItem {
+        let mut item = skill();
+        item.name = name.into();
+        item.content = Content::Mcp {
+            definition: mcp::normalize(
+                &json!({"command":"python3","args":["/synthetic/source/server.py", "/synthetic/source/data"]}),
+                Target::Codex,
+            )
+            .unwrap(),
+        };
+        item
+    }
+
+    #[test]
+    fn mcp_bindings_isolate_items_slots_targets_and_account_destinations() {
+        let t = tempfile::tempdir().unwrap();
+        let mut roots = roots(t.path());
+        roots.codex_homes.push(t.path().join("second-codex"));
+        let ready = |_| Ok(true);
+        let mut adapter = NativeAdapter::new(
+            roots.clone(),
+            t.path().join("local"),
+            BTreeMap::new(),
+            &ready,
+        );
+        let items = [local_mcp("first"), local_mcp("second")];
+        let mut settings = super::super::Settings::default();
+        let mut installations = Vec::new();
+        for target in [Target::Codex, Target::ClaudeCode] {
+            for item in &items {
+                for (index, (locator, slots)) in adapter
+                    .binding_destinations(item, target)
+                    .unwrap()
+                    .into_iter()
+                    .enumerate()
+                {
+                    assert_eq!(slots.len(), 2);
+                    let args: Vec<_> = (0..2)
+                        .map(|slot| {
+                            format!("/synthetic/{}/{index}/{}/{slot}", target.key(), item.name)
+                        })
+                        .collect();
+                    for (slot, value) in args.iter().enumerate() {
+                        settings.bind(
+                            &item.id,
+                            &locator,
+                            &format!("argument:{slot}"),
+                            format!("path:{value}"),
+                        );
+                    }
+                    installations.push((target, locator, item.clone(), args));
+                }
+            }
+        }
+        assert_eq!(installations.len(), 8);
+        // Exercise the same local settings writer and round trip as `bind`.
+        let paths = super::super::Paths::at(t.path().into());
+        paths.save(&settings).unwrap();
+        let mut adapter = NativeAdapter::new(
+            roots,
+            t.path().join("local"),
+            paths.load().unwrap().bindings,
+            &ready,
+        );
+        for _ in 0..2 {
+            for (target, locator, item, args) in &installations {
+                let expected = adapter
+                    .inspect(*target, item, locator)
+                    .unwrap()
+                    .as_ref()
+                    .map(content_digest)
+                    .transpose()
+                    .unwrap();
+                let result = adapter
+                    .apply(*target, item, locator, expected.as_deref())
+                    .unwrap();
+                assert_eq!(result.status, InstallStatus::Ready);
+                assert!(result.applied);
+                let destination = adapter.resolve(*target, item, locator).unwrap();
+                let entry = &native_entries(&destination.path, *target).unwrap()[&item.name];
+                assert_eq!(entry["args"], json!(args));
+            }
+        }
+        assert_eq!(settings.bindings.len(), 16);
+    }
+
+    #[test]
+    fn legacy_mcp_bindings_require_item_rebinding_without_changing_native_files() {
+        let t = tempfile::tempdir().unwrap();
+        let ready = |_| Ok(true);
+        let mut adapter = NativeAdapter::new(
+            roots(t.path()),
+            t.path().join("local"),
+            BTreeMap::new(),
+            &ready,
+        );
+        let items = [local_mcp("first"), local_mcp("second")];
+        let locator = adapter
+            .destinations(Target::Codex, &items[0])
+            .unwrap()
+            .remove(0);
+        let path = t.path().join(".codex/config.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = b"# Preserve unrelated settings\nmodel='synthetic-model'\n";
+        fs::write(&path, original).unwrap();
+        let mut settings = super::super::Settings::default();
+        for slot in ["argument:0", "argument:1"] {
+            settings.bindings.insert(
+                format!("{locator}:{slot}"),
+                "path:/synthetic/ambiguous".into(),
+            );
+        }
+        let legacy = settings.bindings.clone();
+        adapter.bindings = legacy.clone();
+        for item in &items {
+            let result = adapter.apply(Target::Codex, item, &locator, None).unwrap();
+            assert_eq!(result.status, InstallStatus::NeedsSetup);
+            assert!(!result.applied);
+            assert!(
+                result
+                    .detail
+                    .contains("Rebind this item's missing local slots")
+            );
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
+        // Explicitly rebinding one item must neither consume the old keys nor
+        // make the other item installable with that item's private path.
+        for slot in ["argument:0", "argument:1"] {
+            settings.bind(&items[0].id, &locator, slot, "path:/synthetic/first".into());
+        }
+        let paths = super::super::Paths::at(t.path().into());
+        paths.save(&settings).unwrap();
+        adapter.bindings = paths.load().unwrap().bindings;
+        for (key, value) in legacy {
+            assert_eq!(adapter.bindings.get(&key), Some(&value));
+        }
+        assert!(
+            adapter
+                .apply(Target::Codex, &items[0], &locator, None)
+                .unwrap()
+                .applied
+        );
+        let installed = fs::read(&path).unwrap();
+        let result = adapter
+            .apply(Target::Codex, &items[1], &locator, None)
+            .unwrap();
+        assert_eq!(result.status, InstallStatus::NeedsSetup);
+        assert_eq!(fs::read(&path).unwrap(), installed);
+    }
+
+    #[test]
+    fn legacy_mcp_bindings_preserve_each_existing_servers_local_values() {
+        let t = tempfile::tempdir().unwrap();
+        let ready = |_| Ok(true);
+        let mut adapter = NativeAdapter::new(
+            roots(t.path()),
+            t.path().join("local"),
+            BTreeMap::new(),
+            &ready,
+        );
+        let items = [local_mcp("first"), local_mcp("second")];
+        let locator = adapter
+            .destinations(Target::Codex, &items[0])
+            .unwrap()
+            .remove(0);
+        let path = t.path().join(".codex/config.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut bytes = b"# Keep this comment\nmodel='synthetic-model'\n".to_vec();
+        for item in &items {
+            bytes = edit_native(Some(&bytes), Target::Codex, &item.name,
+                Some(&json!({"command":"python3","args":[format!("/synthetic/{}", item.name),"/synthetic/data"]}))).unwrap();
+        }
+        fs::write(&path, bytes).unwrap();
+        for slot in ["argument:0", "argument:1"] {
+            adapter.bindings.insert(
+                format!("{locator}:{slot}"),
+                "path:/synthetic/ambiguous".into(),
+            );
+        }
+        for item in &items {
+            let before = native_entries(&path, Target::Codex).unwrap();
+            let expected = content_digest(
+                &adapter
+                    .inspect(Target::Codex, item, &locator)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            let result = adapter
+                .apply(Target::Codex, item, &locator, Some(&expected))
+                .unwrap();
+            assert_eq!(result.status, InstallStatus::Ready);
+            assert_eq!(native_entries(&path, Target::Codex).unwrap(), before);
+        }
+        let text = fs::read_to_string(path).unwrap();
+        assert!(text.contains("# Keep this comment"));
+        assert!(text.contains("synthetic-model"));
+        assert!(!text.contains("ambiguous"));
+    }
+
+    #[test]
+    fn mcp_binding_follows_item_identity_across_rename_but_not_a_new_same_name_item() {
+        let t = tempfile::tempdir().unwrap();
+        let ready = |_| Ok(true);
+        let mut adapter = NativeAdapter::new(
+            roots(t.path()),
+            t.path().join("local"),
+            BTreeMap::new(),
+            &ready,
+        );
+        let mut item = local_mcp("original");
+        let locator = adapter
+            .destinations(Target::Codex, &item)
+            .unwrap()
+            .remove(0);
+        let mut settings = super::super::Settings::default();
+        for slot in ["argument:0", "argument:1"] {
+            settings.bind(&item.id, &locator, slot, "path:/synthetic/original".into());
+        }
+        adapter.bindings = settings.bindings;
+        item.name = "renamed".into();
+        assert!(
+            adapter
+                .apply(Target::Codex, &item, &locator, None)
+                .unwrap()
+                .applied
+        );
+        let other = local_mcp("original");
+        let result = adapter
+            .apply(Target::Codex, &other, &locator, None)
+            .unwrap();
+        assert_eq!(result.status, InstallStatus::NeedsSetup);
+        assert!(!result.applied);
+        assert_eq!(
+            adapter.inspect(Target::Codex, &other, &locator).unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn staging_race_preserves_new_native_content() {
         use std::cell::Cell;

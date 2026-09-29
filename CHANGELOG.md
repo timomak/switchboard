@@ -81,6 +81,10 @@ Each release is also published at
 
 ### Fixed
 
+- MCP sync keeps local bindings separate for each item, destination and slot,
+  preventing one server's paths from overwriting another's. Existing native
+  values are preserved; ambiguous older bindings require explicit rebinding.
+
 - Claude Desktop switches now reconcile routine pause state and chat archive
   flags separately from execution/activity updates, retain organization-scoped
   baselines, and refresh the merge after shutdown. Schedule merges preserve

@@ -131,6 +131,12 @@ impl Default for Settings {
         }
     }
 }
+impl Settings {
+    fn bind(&mut self, item_id: &str, locator: &str, slot: &str, binding: String) {
+        self.bindings
+            .insert(native::binding_key(item_id, locator, slot), binding);
+    }
+}
 struct Paths {
     home: PathBuf,
     local: PathBuf,
@@ -454,9 +460,7 @@ fn execute(paths: &Paths, action: &Action) -> Result<Value> {
             };
             let target = *selected.iter().next().unwrap();
             for (locator, _) in adapter.binding_destinations(&entry.item, target)? {
-                settings
-                    .bindings
-                    .insert(format!("{locator}:{slot}"), binding.clone());
+                settings.bind(&entry.item.id, &locator, slot, binding.clone());
             }
             paths.save(&settings)?;
         }
