@@ -1,5 +1,6 @@
 import Cocoa
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class ProjectCloneModel: ObservableObject {
@@ -19,6 +20,8 @@ final class ProjectCloneModel: ObservableObject {
     @Published var chatQuery = ""
     @Published var name = ""
     @Published var mode: ProjectFolderMode = .defaultMode
+    @Published var transfer: ContinuationTransferPackage?
+    @Published var transferWorkspace: URL?
     @Published var batch: ProjectCloneBatch?
     @Published var recent: [ProjectCloneBatch] = []
     @Published var busy = false
@@ -30,7 +33,8 @@ final class ProjectCloneModel: ObservableObject {
     func returnToProjects() {
         guard !busy, !opener.busy else { return }
         if let batch { recent = [batch] + recent.filter { $0.id != batch.id } }
-        batch = nil; message = nil; page = 1; opener.finish()
+        batch = nil; transfer = nil; transferWorkspace = nil; selectedChats = []; selectedID = nil
+        message = nil; page = 1; opener.finish()
     }
     func openTerminal(_ item: ProjectCloneItem) {
         guard !busy, !opener.busy, let result = item.result, result.verified else { return }
@@ -94,6 +98,71 @@ final class ProjectCloneModel: ObservableObject {
             } catch { message = (error as? LocalizedError)?.errorDescription ?? "Could not clone these chats." }
         }
     }
+    func exportTransfer() {
+        guard !busy, let project, !selectedChats.isEmpty else { return }
+        protectPopover(true)
+        let panel = NSSavePanel(); panel.title = "Export project chats"
+        panel.allowedContentTypes = [UTType(filenameExtension: ContinuationTransfer.fileExtension) ?? .data]
+        panel.nameFieldStringValue = project.title.replacingOccurrences(of: "/", with: "-") + "." + ContinuationTransfer.fileExtension
+        panel.message = "Export selected chat transcripts for another Mac. Message text may contain private information. Project files, attachments, tools and sign-ins are not included."
+        guard panel.runModal() == .OK, let url = panel.url else { protectPopover(false); return }
+        busy = true; message = nil
+        let selection = selectedChats, title = project.title
+        Task {
+            defer { busy = false; protectPopover(false) }
+            do {
+                try await Task.detached {
+                    let data = try ProjectCloneEngine.transferData(project: project, selected: selection, name: title)
+                    try ContinuationTransfer.write(data, to: url)
+                }.value
+                message = "Exported \(selection.count) chats. Open this file with Import transfer on the other Mac."
+            } catch { message = (error as? LocalizedError)?.errorDescription ?? "Could not export every selected chat. Refresh the project and try again." }
+        }
+    }
+    func importTransfer() {
+        guard !busy else { return }
+        protectPopover(true)
+        let panel = NSOpenPanel(); panel.title = "Import project chats"
+        panel.allowedContentTypes = [UTType(filenameExtension: ContinuationTransfer.fileExtension) ?? .data]
+        panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
+        panel.message = "Choose a project chat transfer. You will review it and choose a folder on this Mac before any chats are created."
+        guard panel.runModal() == .OK, let url = panel.url else { protectPopover(false); return }
+        busy = true; message = nil
+        Task {
+            defer { busy = false; protectPopover(false) }
+            do {
+                let package = try await Task.detached {
+                    try ContinuationTransfer.decode(ContinuationFiles.read(url, limit: ContinuationLimits.input))
+                }.value
+                guard package.kind == .project else { message = "This is a single chat. Use Continue in another app → Import transfer instead."; return }
+                transfer = package; transferWorkspace = nil; name = package.title
+                selectedChats = Set(package.chats.map(\.id)); batch = nil; page = 2
+            } catch { message = (error as? LocalizedError)?.errorDescription ?? "Could not read this transfer file." }
+        }
+    }
+    func chooseTransferWorkspace() {
+        protectPopover(true); defer { protectPopover(false) }
+        let panel = NSOpenPanel(); panel.title = "Choose a folder on this Mac"
+        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose the existing working folder for these chats. No project files will be copied or created."
+        if panel.runModal() == .OK { transferWorkspace = panel.url }
+    }
+    func createTransfer() {
+        guard !busy, let transfer, let workspace = transferWorkspace, !selectedChats.isEmpty else { return }
+        busy = true; message = nil; protectPopover(true)
+        let chats = transfer.chats.filter { selectedChats.contains($0.id) }, title = name, target = destination, store = store
+        Task {
+            defer { busy = false; protectPopover(false) }
+            do {
+                batch = try await Task.detached {
+                    try ProjectCloneEngine.prepareTransfer(chats: chats, name: title, destination: target, workspace: workspace, store: store)
+                }.value
+                page = 3
+                batch = try await run(batch!)
+            } catch { message = (error as? LocalizedError)?.errorDescription ?? "Could not import these chats." }
+        }
+    }
     func retry() {
         guard !busy, let batch else { return }
         busy = true; message = nil; protectPopover(true)
@@ -140,9 +209,9 @@ struct ProjectCloneView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     if model.page == 1 { choose }
-                    else if model.page == 2 { review }
+                    else if model.page == 2 { if model.transfer != nil { transferReview } else { review } }
                     else { results }
-                    if model.busy { ProgressView(model.page == 3 && model.destination == .claudeDesktopCode ? "Copying and opening in Claude…" : "Preparing…").controlSize(.small) }
+                    if model.busy { ProgressView(model.page == 3 && model.destination == .claudeDesktopCode && model.batch?.isTransferImport != true ? "Copying and opening in Claude…" : "Preparing…").controlSize(.small) }
                     if let message = model.message { Text(message).font(.caption) }
                     ProjectCloneOpeningStatus(model: model.opener)
                 }.padding(16)
@@ -163,9 +232,10 @@ struct ProjectCloneView: View {
                 if model.page == 1 {
                     Button("Next") { model.page = 2; advanced = false }.disabled(model.selectedChats.isEmpty || model.busy).keyboardShortcut(.defaultAction)
                 } else if model.page == 2 {
-                    Button("Clone \(model.selectedChats.count) chats") { model.create() }
-                        .disabled(model.busy || model.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.destination == .claudeChat).keyboardShortcut(.defaultAction)
-                } else if !model.busy, let batch = model.batch, batch.items.contains(where: { $0.chat != nil && ($0.result?.verified != true || (batch.destination == .claudeDesktopCode && $0.desktopHandoff == nil)) }) {
+                    Button("\(model.transfer == nil ? "Clone" : "Import") \(model.selectedChats.count) chats") {
+                        if model.transfer == nil { model.create() } else { model.createTransfer() }
+                    }.disabled(model.busy || model.selectedChats.isEmpty || model.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.destination == .claudeChat || (model.transfer != nil && model.transferWorkspace == nil)).keyboardShortcut(.defaultAction)
+                } else if !model.busy, let batch = model.batch, batch.items.contains(where: { $0.chat != nil && ($0.result?.verified != true || (batch.destination == .claudeDesktopCode && !batch.isTransferImport && $0.desktopHandoff == nil)) }) {
                     Button("Retry") { model.retry() }.disabled(model.busy || model.opener.busy)
                 }
             }.padding(16)
@@ -177,6 +247,11 @@ struct ProjectCloneView: View {
         Group {
             Text("1 OF 2").font(.caption).foregroundStyle(.secondary)
             Text("Choose a project").font(.title3).fontWeight(.semibold)
+            HStack {
+                Button("Import transfer…") { model.importTransfer() }
+                Button("Export selected chats…") { model.exportTransfer() }.disabled(model.selectedChats.isEmpty)
+            }.disabled(model.busy)
+            Text("Transfers contain selected chats only. Set up project files on the other Mac separately.").font(.caption).foregroundStyle(.secondary)
             Picker("From", selection: $model.source) {
                 ForEach(ContinuationSurface.sources) { Text($0.title).tag($0) }
             }.onChange(of: model.source) { _, _ in model.query = ""; model.refresh() }.disabled(model.busy)
@@ -256,6 +331,35 @@ struct ProjectCloneView: View {
             }
         }.disabled(model.busy)
     }
+    private var transferReview: some View {
+        Group {
+            Text("Review project chats").font(.title3).fontWeight(.semibold)
+            TextField("Transfer name", text: $model.name).textFieldStyle(.roundedBorder)
+            Picker("Import into", selection: $model.destination) {
+                ForEach(ContinuationSurface.allCases.filter { $0 != .claudeChat }) { Text($0.title).tag($0) }
+            }
+            Button("Choose existing local folder…") { model.chooseTransferWorkspace() }
+            if let workspace = model.transferWorkspace { Text(workspace.path).font(.caption).textSelection(.enabled) }
+            else { Text("A folder on this Mac is required.").font(.caption).foregroundStyle(.secondary) }
+            Text("Creates separate chats in this folder. Project registration, files, Git history, attachments, instructions, tools and sign-ins are not transferred. Historical paths in message text stay unchanged. Nothing opens automatically.").font(.caption).foregroundStyle(.secondary)
+            if let transfer = model.transfer {
+                ForEach(transfer.chats) { chat in
+                    Toggle(chat.title, isOn: Binding(get: { model.selectedChats.contains(chat.id) }, set: { value in
+                        if value { model.selectedChats.insert(chat.id) } else { model.selectedChats.remove(chat.id) }
+                    }))
+                    DisclosureGroup("Preview \(chat.messages.count) messages") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(chat.messages.prefix(3).enumerated()), id: \.offset) { _, message in
+                                Text("\(message.role): \(String(message.text.prefix(500)))").font(.caption).textSelection(.enabled)
+                            }
+                            if chat.messages.count > 3 { Text("Preview shows the first three messages.").font(.caption).foregroundStyle(.secondary) }
+                            ForEach(chat.omissions, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
+                        }
+                    }
+                }
+            }
+        }.disabled(model.busy)
+    }
     private var results: some View {
         Group {
             if let batch = model.batch {
@@ -269,7 +373,7 @@ struct ProjectCloneView: View {
                             } else if let issue = item.issue {
                                 Text(issue).font(.caption).foregroundStyle(.secondary)
                             } else if batch.destination == .claudeDesktopCode && item.result?.verified == true && item.desktopHandoff == nil {
-                                Text("History copied · waiting to open").font(.caption).foregroundStyle(.secondary)
+                                Text(batch.isTransferImport ? "History imported · open when ready" : "History copied · waiting to open").font(.caption).foregroundStyle(.secondary)
                             }
                         }
                         Spacer()

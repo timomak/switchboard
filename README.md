@@ -9,7 +9,7 @@ Claude and Codex accounts, within reach. Switchboard is a native macOS menu bar 
 - See Claude five-hour and weekly usage and Codex weekly usage.
 - Manage saved accounts and API connections from Settings.
 - [Continue a conversation in another app](docs/continue-in-another-app.md) by cloning supported local chat histories into independent native sessions.
-- [Sync chats between Macs](docs/chat-sync.md) through iCloud, with shared account history inside Codex and Claude and separate histories between the apps.
+- [Transfer chats between Macs](docs/mac-transfers.md) with explicit transcript packages and a project folder chosen on the receiving Mac.
 - [Sync personal skills and MCP setups](docs/tools-skills-sync.md) through iCloud, with separate Codex, Claude Code and Cowork destinations.
 - [Clone a local folder project](docs/clone-project.md) into separate chats with optional file copying and resumable batch results.
 

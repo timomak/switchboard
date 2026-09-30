@@ -50,10 +50,13 @@ struct ProjectCloneBatch: Codable, Identifiable {
     let createdAt: Date
     var omissions: [String]
     var items: [ProjectCloneItem]
+    var transferImport: Bool? = nil
+    var isTransferImport: Bool { transferImport == true }
     var verifiedCount: Int { items.filter { $0.result?.verified == true }.count }
     var desktopReadyCount: Int { items.filter { $0.desktopHandoff == "opened" }.count }
     var resultTitle: String {
-        destination == .claudeDesktopCode ? "\(desktopReadyCount) of \(items.count) chats ready in Claude" : "\(verifiedCount) of \(items.count) chats cloned"
+        if isTransferImport { return "\(verifiedCount) of \(items.count) chats imported" }
+        return destination == .claudeDesktopCode ? "\(desktopReadyCount) of \(items.count) chats ready in Claude" : "\(verifiedCount) of \(items.count) chats cloned"
     }
 }
 
@@ -130,6 +133,45 @@ enum ProjectCloneEngine {
         return batch
     }
 
+    static func transferData(project: ContinuationProject, selected: Set<String>, name: String,
+                             read: (ContinuationLocalChat) throws -> ContinuationChat = ContinuationDiscovery.read) throws -> Data {
+        let entries = project.chats.filter { selected.contains($0.chat.id) }
+        guard !entries.isEmpty, entries.count <= ContinuationLimits.chats,
+              Set(entries.map { $0.chat.id }) == selected else { throw ContinuationError.invalid }
+        // Fail the selection as a whole instead of silently omitting an unreadable chat.
+        let chats = try entries.map { entry in try Task.checkCancellation(); return try read(entry) }
+        return try ContinuationTransfer.encode(chats: chats, title: name, kind: .project)
+    }
+
+    static func prepareTransfer(chats: [ContinuationChat], name: String, destination: ContinuationSurface,
+                                workspace: URL, store: ContinuationStore) throws -> ProjectCloneBatch {
+        guard destination != .claudeChat else { throw ContinuationNativeError.chatUnsupported }
+        // Revalidate the entire selection before creating a local batch or native chats.
+        let package = try ContinuationTransfer.decode(ContinuationTransfer.encode(chats: chats, title: name, kind: .project))
+        let localWorkspace = workspace.resolvingSymlinksInPath().standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard workspace.isFileURL,
+              FileManager.default.fileExists(atPath: localWorkspace.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { throw ContinuationNativeError.workspace }
+        try store.setup()
+        try ContinuationFiles.directory(store.root.appendingPathComponent("projects"))
+        let batch = ProjectCloneBatch(id: UUID(), name: package.title, destination: destination,
+            storageRoot: ContinuationNative.storageRoot(destination), workspace: localWorkspace, folderMode: .shared,
+            createdAt: Date(), omissions: [
+                "Transferred selected chat transcripts only; no project registration or sidebar grouping.",
+                "Working files, Git history, instructions, tools, attachments and authentication are not transferred.",
+                "Chats use the existing folder selected on this Mac. Historical paths in message text are unchanged.",
+                "Imported chats are not opened automatically."
+            ], items: package.chats.map { .init(id: UUID(), title: $0.title, chat: $0) }, transferImport: true)
+        let folder = directory(batch, store: store)
+        try ContinuationFiles.directory(folder)
+        var committed = false
+        defer { if !committed { try? FileManager.default.removeItem(at: folder) } }
+        guard try JSONEncoder().encode(batch).count <= ContinuationLimits.input else { throw ContinuationError.tooLarge }
+        try save(batch, store: store); committed = true
+        return batch
+    }
+
     static func copyFiles(from source: URL, to destination: URL) throws -> [String] {
         // No symlink traversal, Git metadata, dotfiles, executable agent configuration,
         // dependencies or generated output. Snapshot only bounded regular files.
@@ -168,7 +210,7 @@ enum ProjectCloneEngine {
                         openChat: (String, URL) throws -> Void = { script, folder in
                             try ContinuationDesktopHandoff.run(script: script, directory: folder)
                         }) throws -> ProjectCloneBatch {
-        guard input.destination == .claudeDesktopCode else { return input }
+        guard input.destination == .claudeDesktopCode, !input.isTransferImport else { return input }
         let folder = directory(input, store: store)
         let fd = open(folder.appendingPathComponent(".lock").path, O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
         guard fd >= 0 else { throw ContinuationError.storage }
@@ -176,6 +218,7 @@ enum ProjectCloneEngine {
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw ContinuationError.storage }
         defer { flock(fd, LOCK_UN) }
         var batch = try load(folder)
+        guard !batch.isTransferImport else { return batch }
         for index in batch.items.indices {
             try Task.checkCancellation()
             guard let result = batch.items[index].result, result.verified,

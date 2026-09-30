@@ -51,6 +51,14 @@ Claude JSON exports, JSONL, TXT and Markdown can supply fallback sources. Plain 
 without independently parsed roles remains a single historical message, not a claim
 of reconstructed turns. Native catalogs are never copied into the imported library.
 
+## Transfer to another Mac
+
+Use **Export for another Mac…** to save a selected conversation as a text-only
+`.switchboard-transfer` file. On the receiving Mac, use **Import transfer…**,
+review it and explicitly choose an existing local folder before creating the chat.
+This uses the same destination adapters and existing destination login. See
+[Mac transfers](mac-transfers.md) for scope, privacy and path behavior.
+
 ## Fidelity and local storage
 
 User/assistant text and ordering are preserved. Timestamps and title are retained

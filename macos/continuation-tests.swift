@@ -107,8 +107,82 @@ struct ContinuationTests {
         do { _ = try await operation.value; fatalError("cancelled preparation succeeded") }
         catch { checks += 1; print("  ✓ cancelled preparation does not commit") }
         check(!FileManager.default.fileExists(atPath: store.root.appendingPathComponent(cancelledID.uuidString).path), "cancelled staging removed")
+        try transferTests(root)
         try discoveryTests(root)
         print("\n\(checks) continuation checks passed")
+    }
+    static func transferTests(_ root: URL) throws {
+        let oldPath = "/Users/source-owner/Projects/fixture"
+        var source = try ContinuationChat.make(surface: .claudeCode, title: "Travel 🐈", messages: [
+            .init(role: "User", text: "Read \(oldPath)/main.swift\n$(touch NEVER_RUN)", timestamp: "2026-09-30T09:00:00Z"),
+            .init(role: "Assistant", text: "Historical response é")], omissions: ["A native image is not included."])
+        let canonicalID = source.id
+        source.id = "local:machine-specific-id"
+        let bytes = try ContinuationTransfer.encode(chats: [source], title: source.title, kind: .chat)
+        let package = try ContinuationTransfer.decode(bytes)
+        check(package.kind == .chat && package.title == source.title, "portable chat kind and Unicode title retained")
+        check(package.chats[0].id == canonicalID, "portable import regenerates source catalog ID")
+        check(package.chats[0].messages == source.messages, "portable messages, roles, timestamps and historical paths remain exact")
+        check(package.chats[0].omissions.contains(ContinuationTransfer.disclosure), "text-only and unchanged-path limitations survive import")
+        let wire = String(decoding: bytes, as: UTF8.self)
+        check(!wire.contains("machine-specific-id") && !wire.contains("importedAt") && !wire.contains("storageRoot") && !wire.contains("workspace"), "portable envelope excludes sender identity, dates and storage metadata")
+        let library = ContinuationStore(root: root.appendingPathComponent("transfer-library"))
+        try library.save(package.chats)
+        let reloaded = try library.load()
+        check(reloaded == package.chats, "imported transfer survives private library reload without invalid IDs")
+        let transferFile = root.appendingPathComponent("fixture." + ContinuationTransfer.fileExtension)
+        try ContinuationTransfer.write(bytes, to: transferFile)
+        check(tryValue { try Data(contentsOf: transferFile) } == bytes, "transfer export is an exact standalone file")
+        let attrs = try FileManager.default.attributesOfItem(atPath: transferFile.path)
+        check(attrs[.posixPermissions] as? Int == 0o600, "exported transfer uses private permissions")
+        check(source.id == "local:machine-specific-id", "portable export leaves the source snapshot unchanged")
+        let second = try ContinuationChat.make(surface: .codexDesktop, title: "Second", messages: [.init(role: "User", text: "Distinct text")])
+        let projectBytes = try ContinuationTransfer.encode(chats: [source, second], title: "Project", kind: .project)
+        check(tryValue { try ContinuationTransfer.decode(projectBytes).chats.count } == 2, "project package round trips multiple transcripts")
+        rejects("single chat envelope cannot hide a batch") { _ = try ContinuationTransfer.encode(chats: [source, second], title: "Batch", kind: .chat) }
+        rejects("project cannot silently conflate duplicate canonical transcripts") { _ = try ContinuationTransfer.encode(chats: [source, source], title: "Duplicates", kind: .project) }
+        let object = try JSONSerialization.jsonObject(with: bytes) as! [String: Any]
+        func changed(_ mutate: (inout [String: Any]) -> Void) throws -> Data {
+            var value = object; mutate(&value); return try JSONSerialization.data(withJSONObject: value)
+        }
+        func changedChat(_ mutate: (inout [String: Any]) -> Void) throws -> Data {
+            try changed { value in var chats = value["chats"] as! [[String: Any]]; mutate(&chats[0]); value["chats"] = chats }
+        }
+        func changedMessage(_ mutate: (inout [String: Any]) -> Void) throws -> Data {
+            try changedChat { chat in var messages = chat["messages"] as! [[String: Any]]; mutate(&messages[0]); chat["messages"] = messages }
+        }
+        rejects("unsupported transfer version rejected") { _ = try ContinuationTransfer.decode(changed { $0["version"] = 2 }) }
+        rejects("boolean cannot masquerade as transfer version") { _ = try ContinuationTransfer.decode(changed { $0["version"] = true }) }
+        rejects("unknown transfer kind rejected") { _ = try ContinuationTransfer.decode(changed { $0["kind"] = "auth" }) }
+        rejects("unknown provider rejected") { _ = try ContinuationTransfer.decode(changedChat { $0["surface"] = "unknown" }) }
+        rejects("destination-only surface cannot enter the source library") { _ = try ContinuationTransfer.decode(changedChat { $0["surface"] = "claudeDesktopCode" }) }
+        rejects("unrecognized envelope fields rejected") { _ = try ContinuationTransfer.decode(changed { $0["credentials"] = "synthetic" }) }
+        rejects("sender workspace metadata rejected") { _ = try ContinuationTransfer.decode(changedChat { $0["workspace"] = oldPath }) }
+        rejects("executable fields on a message rejected") { _ = try ContinuationTransfer.decode(changedMessage { $0["command"] = "do-not-run" }) }
+        rejects("system messages are never portable authority") { _ = try ContinuationTransfer.decode(changedMessage { $0["role"] = "System" }) }
+        rejects("unknown message roles rejected") { _ = try ContinuationTransfer.decode(changedMessage { $0["role"] = "Tool" }) }
+        rejects("multiline titles rejected") { _ = try ContinuationTransfer.decode(changed { $0["title"] = "one\ntwo" }) }
+        rejects("oversized chat title rejected") { _ = try ContinuationTransfer.decode(changedChat { $0["title"] = String(repeating: "a", count: 121) }) }
+        rejects("oversized omissions rejected") { _ = try ContinuationTransfer.decode(changedChat { $0["omissions"] = [String(repeating: "a", count: 1025)] }) }
+        rejects("oversized timestamp rejected") { _ = try ContinuationTransfer.decode(changedMessage { $0["timestamp"] = String(repeating: "x", count: 129) }) }
+        rejects("truncated portable JSON rejected") { _ = try ContinuationTransfer.decode(bytes.dropLast()) }
+        rejects("empty package rejected") { _ = try ContinuationTransfer.decode(changed { $0["chats"] = [] }) }
+        rejects("oversized project chat count rejected") { _ = try ContinuationTransfer.decode(changed { $0["kind"] = "project"; $0["chats"] = Array(repeating: (object["chats"] as! [[String: Any]])[0], count: 201) }) }
+        rejects("oversized message count rejected") { _ = try ContinuationTransfer.decode(changedChat { $0["messages"] = Array(repeating: ["role": "User", "text": "x"], count: 10_001) }) }
+        rejects("oversized portable transcript rejected") { _ = try ContinuationTransfer.decode(changedMessage { $0["text"] = String(repeating: "x", count: ContinuationLimits.transcript + 1) }) }
+        rejects("duplicate transcripts in imported package rejected") {
+            _ = try ContinuationTransfer.decode(changed { $0["kind"] = "project"; $0["chats"] = Array(repeating: (object["chats"] as! [[String: Any]])[0], count: 2) })
+        }
+        var draft = ContinuationDraft(chat: package.chats[0], destination: .codexDesktop)
+        draft.requiresWorkspace = true
+        rejects("received chat requires an explicit receiver workspace") { try draft.validate() }
+        draft.workspace = root.appendingPathComponent("missing-workspace")
+        rejects("received chat rejects a nonexistent workspace") { try draft.validate() }
+        draft.workspace = transferFile
+        rejects("received chat rejects a regular file as workspace") { try draft.validate() }
+        draft.workspace = root
+        try draft.validate()
+        check(draft.workspace == root && draft.chat.messages[0].text.contains(oldPath), "receiver folder selection does not rewrite historical paths")
     }
     static func discoveryTests(_ root: URL) throws {
         let home = root.appendingPathComponent("native-home")

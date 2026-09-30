@@ -307,9 +307,9 @@ organisation that published them; see the
 
 Account removal and chat filters (`only` / `reset`) are not implemented. Remove
 a profile directory manually. Ordinary account switching keeps Cowork sessions
-in their account-specific native folders. The separate [Chat sync](chat-sync.md)
-feature can restore native Cowork history across existing account scopes and
-between Macs while keeping authentication local.
+in their account-specific native folders. Automatic [Chat sync](chat-sync.md) is
+retired. [Manual Mac transfers](mac-transfers.md) support Claude Code conversation
+text; they do not import Cowork stores or transfer authentication.
 
 Profile-format compatibility attribution is recorded in
 [third-party notices](../THIRD_PARTY_NOTICES.md).

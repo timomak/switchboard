@@ -1,16 +1,18 @@
-//! Cross-Mac native chat replication. Credentials and application databases
-//! remain local; iCloud carries immutable, provider-specific session packages.
+//! Legacy native chat archives and capture/restore adapters. Automatic cross-Mac
+//! replication is retired; status and disable retain access to existing settings.
 pub mod claude;
 pub mod codex;
+// Keep archive/recovery primitives and their regression tests while the bulk
+// replication entry point is retired. Library sync also uses its file utilities.
+#[allow(dead_code)]
 pub(crate) mod engine;
 #[cfg(test)]
 mod engine_tests;
 
 use crate::{AppError, Result};
-use engine::{Adapter, Counts, Provider, State, error};
+use engine::{Counts, Provider, error};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 /// An adapter-owned native session, never a lossy user/assistant transcript.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -26,7 +28,7 @@ pub enum Action {
         #[arg(long)]
         json: bool,
     },
-    /// Enable chat sync through the user's iCloud Drive.
+    /// Retired: automatic chat sync can no longer be enabled.
     Enable {
         #[arg(long)]
         json: bool,
@@ -34,17 +36,17 @@ pub enum Action {
         #[arg(long)]
         folder: Option<PathBuf>,
     },
-    /// Pause syncing. Existing local chats and iCloud snapshots are retained.
+    /// Clear the legacy enabled setting, retaining all chats and archives.
     Disable {
         #[arg(long)]
         json: bool,
     },
-    /// Sync closed apps now. Running apps are left alone and retried later.
+    /// Retired: bulk chat synchronization is no longer available.
     Run {
         #[arg(long)]
         json: bool,
     },
-    /// Map a project folder from the other Mac to its location on this Mac.
+    /// Retired: automatic chat-sync path mappings are no longer editable.
     MapPath {
         from: String,
         to: String,
@@ -64,11 +66,8 @@ struct Settings {
 
 #[derive(Clone, Debug)]
 struct Paths {
-    home: PathBuf,
     local: PathBuf,
     icloud: PathBuf,
-    codex: PathBuf,
-    claude: PathBuf,
 }
 
 impl Paths {
@@ -76,21 +75,15 @@ impl Paths {
         Self {
             local: home.join("Library/Application Support/Switchboard Sync"),
             icloud: home.join("Library/Mobile Documents/com~apple~CloudDocs"),
-            codex: home.join(".codex"),
-            claude: home.join("Library/Application Support/Claude"),
-            home,
         }
     }
     fn resolve() -> Result<Self> {
-        let mut paths = Self::at(crate::cache::home_dir()?);
-        if let Some(home) = std::env::var_os("CODEX_HOME") {
-            paths.codex = PathBuf::from(home);
-        }
-        Ok(paths)
+        Ok(Self::at(crate::cache::home_dir()?))
     }
     fn settings(&self) -> PathBuf {
         self.local.join("config.json")
     }
+    #[cfg(test)]
     fn state(&self) -> PathBuf {
         self.local.join("state.json")
     }
@@ -111,7 +104,7 @@ impl Paths {
             1024 * 1024,
         )?)
         .map_err(|_| {
-            error("The chat sync settings are unreadable. Restore them before enabling sync.")
+            error("The legacy chat sync settings are unreadable. Restore them from backup to inspect or disable them.")
         })?;
         if value.version != engine::VERSION || !value.folder.is_absolute() {
             return Err(error("The chat sync settings use an unsupported format."));
@@ -150,6 +143,10 @@ impl ProviderStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Status {
     enabled: bool,
+    #[serde(default)]
+    retired: bool,
+    #[serde(default)]
+    legacy_enabled: bool,
     available: bool,
     sync_root: PathBuf,
     device_id: Option<String>,
@@ -186,7 +183,9 @@ fn status(paths: &Paths, settings: &Settings) -> Result<Status> {
         None
     };
     let mut value = cached.unwrap_or_else(|| Status {
-        enabled: settings.enabled,
+        enabled: false,
+        retired: true,
+        legacy_enabled: settings.enabled,
         available: available(paths, settings),
         sync_root: settings.folder.clone(),
         device_id: None,
@@ -207,14 +206,16 @@ fn status(paths: &Paths, settings: &Settings) -> Result<Status> {
         pending: 0,
         conflicts: 0,
     });
-    value.enabled = settings.enabled;
+    value.enabled = false;
+    value.retired = true;
+    value.legacy_enabled = settings.enabled;
     value.available = available(paths, settings);
     value.sync_root = settings.folder.clone();
-    if !settings.enabled {
-        value.message = Some("Chat sync is off. Existing chats and snapshots are kept.".into());
-    } else if !value.available {
-        value.message =
-            Some("The sync folder is unavailable. Enable iCloud Drive on this Mac.".into());
+    value.message = Some(RETIRED_MESSAGE.into());
+    for account in &mut value.accounts {
+        account.state = "retired".into();
+        account.detail =
+            "Historical sync counts only; automatic chat sync has been removed.".into();
     }
     Ok(value)
 }
@@ -225,43 +226,6 @@ fn public_error(value: &AppError) -> String {
     match value {
         AppError::Other(message) => crate::display::sanitize_untrusted_line(message),
         _ => "Could not read or restore native chat data. Your existing chats and sync snapshots were kept.".into(),
-    }
-}
-
-struct NativeAdapter<'a> {
-    paths: &'a Paths,
-    provider: Provider,
-    mappings: Vec<(String, String)>,
-}
-
-impl Adapter for NativeAdapter<'_> {
-    fn capture(&mut self) -> Result<Vec<NativeSession>> {
-        match self.provider {
-            Provider::Codex => codex::capture(&self.paths.codex),
-            Provider::Claude => claude::capture(&self.paths.claude, &self.paths.home),
-        }
-    }
-    fn restore(&mut self, session: &NativeSession, target_id: &str) -> Result<()> {
-        match self.provider {
-            Provider::Codex => codex::restore_if_idle(
-                &self.paths.codex,
-                session,
-                target_id,
-                &self.mappings,
-                &|| provider_stopped(Provider::Codex),
-            ),
-            Provider::Claude => claude::restore_if_idle(
-                &self.paths.claude,
-                &self.paths.home,
-                session,
-                target_id,
-                &self.mappings,
-                &|| provider_stopped(Provider::Claude),
-            ),
-        }
-    }
-    fn ready(&self) -> Result<bool> {
-        provider_stopped(self.provider)
     }
 }
 
@@ -366,163 +330,21 @@ pub(crate) fn provider_stopped(provider: Provider) -> Result<bool> {
     Ok(true)
 }
 
-fn run_sync(paths: &Paths, settings: &Settings) -> Result<Status> {
-    let mut report = status(paths, settings)?;
-    if !settings.enabled || !report.available {
-        return Ok(report);
-    }
-    engine::private_dir(&paths.local)?;
-    let _sync_lock =
-        crate::cache::acquire_lock(&paths.local.join("sync.lock"), Duration::from_secs(2))?;
-    engine::private_dir(&settings.folder)?;
-    let mut state = State::load(&paths.state())?;
-    state.save(&paths.state())?;
-    report.device_id = Some(state.device_id.clone());
-    report.accounts.clear();
-    report.pending = 0;
-    report.conflicts = 0;
-    let mut mappings = settings.mappings.clone();
-    mappings.push((
-        "__SWITCHBOARD_HOME__".into(),
-        paths.home.to_string_lossy().into_owned(),
-    ));
-    // Longer source prefixes must win over a broad home-directory mapping.
-    mappings.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
-    for provider in [Provider::Codex, Provider::Claude] {
-        let mut item = ProviderStatus::new(provider, "ready", "History is up to date.");
-        let result = (|| -> Result<Counts> {
-            if !provider_stopped(provider)? {
-                return Ok(Counts {
-                    pending: 1,
-                    ..Counts::default()
-                });
-            }
-            // Coordinate with existing account switching. No authentication
-            // file is read, copied, refreshed, or uploaded by this feature.
-            let config = crate::config::Config::load()?;
-            let claude_paths = crate::claude_desktop::Paths::resolve(&config.anthropic)?;
-            let codex_paths = crate::codex_account::store::Paths::resolve()?;
-            let lock_path = match provider {
-                Provider::Codex => codex_paths.root.join("operation.lock"),
-                Provider::Claude => claude_paths.account_switch_lock(),
-            };
-            engine::private_dir(
-                lock_path
-                    .parent()
-                    .ok_or_else(|| error("Invalid account lock path."))?,
-            )?;
-            let _account_lock = crate::cache::acquire_lock(&lock_path, Duration::from_secs(2))?;
-            let _cli_lock = if provider == Provider::Codex {
-                Some(crate::cli_session::exclusive(&codex_paths.root)?)
-            } else {
-                None
-            };
-            if !provider_stopped(provider)? {
-                return Ok(Counts {
-                    pending: 1,
-                    ..Counts::default()
-                });
-            }
-            if provider == Provider::Claude {
-                claude::reconcile_if_idle(&paths.claude, &paths.home, &mappings, &|| {
-                    provider_stopped(Provider::Claude)
-                })?;
-            }
-            let mut adapter = NativeAdapter {
-                paths,
-                provider,
-                mappings: mappings.clone(),
-            };
-            engine::sync(
-                &settings.folder,
-                &paths.state(),
-                &mut state,
-                provider,
-                &mut adapter,
-            )
-        })();
-        match result {
-            Ok(counts) => {
-                item.counts = counts;
-                if item.counts.pending > 0 {
-                    item.state = "waiting".into();
-                    item.detail = format!(
-                        "Quit {} and its CLI sessions to sync. Incomplete iCloud downloads retry automatically.",
-                        provider.label()
-                    );
-                } else if item.counts.conflicts > 0 {
-                    item.detail =
-                        "Both versions of changed chats were kept as separate native chats.".into();
-                }
-            }
-            Err(value) => {
-                item.state = "error".into();
-                item.detail = public_error(&value);
-                item.counts.pending = 1;
-            }
-        }
-        report.pending += item.counts.pending;
-        report.conflicts += item.counts.conflicts;
-        report.accounts.push(item);
-    }
-    report.last_sync_at =
-        Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
-    report.message = Some("Enable chat sync on your other Mac with the same iCloud account. Sign into Claude and Codex separately on each Mac.".into());
-    engine::atomic_write(&paths.report(), &serde_json::to_vec(&report)?)?;
-    Ok(report)
-}
+const RETIRED_MESSAGE: &str = "Automatic chat sync has been removed. Existing chats, iCloud archives, and recovery records are kept. Use `chat-sync status` to inspect legacy state or `chat-sync disable` to clear its old enabled setting.";
 
 fn execute(paths: &Paths, action: &Action) -> Result<Status> {
-    let mut settings = paths.load_settings()?;
-    if matches!(action, Action::Status { .. }) {
-        return status(paths, &settings);
+    // Reject stale menu-bar clients and scripts before reading any chat stores,
+    // archive directory, or old settings. An enabled legacy config is inert.
+    if matches!(
+        action,
+        Action::Enable { .. } | Action::Run { .. } | Action::MapPath { .. }
+    ) {
+        return Err(error(RETIRED_MESSAGE));
     }
-    match action {
-        Action::Enable { folder, .. } => {
-            if let Some(folder) = folder {
-                if !folder.is_absolute() || !folder.is_dir() {
-                    return Err(error(
-                        "Choose an existing absolute path for the private sync folder.",
-                    ));
-                }
-                if settings.enabled && settings.folder != *folder {
-                    return Err(error("Disable sync before changing its folder."));
-                }
-                if paths.state().exists() && settings.folder != *folder {
-                    return Err(error(
-                        "This Mac already has a sync archive. Keep its existing folder so revision history and recovery records stay together.",
-                    ));
-                }
-                settings.folder = folder.clone();
-            }
-            if !available(paths, &settings) {
-                return Err(error(
-                    "Enable iCloud Drive in System Settings before enabling chat sync.",
-                ));
-            }
-            settings.enabled = true;
-            paths.save_settings(&settings)?;
-        }
-        Action::Disable { .. } => {
-            settings.enabled = false;
-            paths.save_settings(&settings)?;
-        }
-        Action::MapPath { from, to, .. } => {
-            if !Path::new(from).is_absolute()
-                || !Path::new(to).is_absolute()
-                || from.contains('\0')
-                || to.contains('\0')
-            {
-                return Err(error(
-                    "Project path mappings must use absolute folder paths.",
-                ));
-            }
-            settings.mappings.retain(|(key, _)| key != from);
-            settings.mappings.push((from.clone(), to.clone()));
-            paths.save_settings(&settings)?;
-        }
-        Action::Run { .. } => return run_sync(paths, &settings),
-        Action::Status { .. } => (),
+    let mut settings = paths.load_settings()?;
+    if matches!(action, Action::Disable { .. }) && settings.enabled {
+        settings.enabled = false;
+        paths.save_settings(&settings)?;
     }
     status(paths, &settings)
 }
@@ -545,6 +367,12 @@ pub fn run(action: &Action) -> i32 {
                     "Chat sync: {}",
                     if report.enabled { "enabled" } else { "off" }
                 );
+                if let Some(message) = report.message {
+                    println!("{message}");
+                }
+                if report.legacy_enabled {
+                    println!("Legacy enabled setting: true (inactive)");
+                }
                 for item in report.accounts {
                     println!("{}: {}", item.label, item.detail);
                 }
@@ -555,7 +383,7 @@ pub fn run(action: &Action) -> i32 {
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({"enabled":false,"available":false,"message":public_error(&value),"accounts":[]})
+                    serde_json::json!({"enabled":false,"retired":true,"available":false,"message":public_error(&value),"accounts":[]})
                 );
             } else {
                 eprintln!("{}", public_error(&value));
@@ -569,116 +397,132 @@ pub fn run(action: &Action) -> i32 {
 mod tests {
     use super::*;
     #[test]
-    fn disabled_status_and_run_do_not_create_or_upload_data() {
+    fn status_and_disable_without_legacy_data_create_nothing() {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::at(home.path().to_path_buf());
-        assert!(
-            !execute(&paths, &Action::Status { json: true })
-                .unwrap()
-                .enabled
-        );
-        assert!(
-            !execute(&paths, &Action::Run { json: true })
-                .unwrap()
-                .enabled
-        );
+        for action in [
+            Action::Status { json: true },
+            Action::Disable { json: true },
+        ] {
+            let report = execute(&paths, &action).unwrap();
+            assert!(!report.enabled);
+            assert!(report.retired);
+            assert!(!report.legacy_enabled);
+        }
         assert!(!paths.local.exists());
         assert!(!paths.icloud.exists());
     }
+
     #[test]
-    fn enable_requires_icloud_and_never_uploads_on_its_own() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::at(home.path().to_path_buf());
-        assert!(
-            execute(
-                &paths,
-                &Action::Enable {
+    fn retired_bulk_commands_cannot_activate_fresh_or_previously_enabled_settings() {
+        for previously_enabled in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let paths = Paths::at(home.path().to_path_buf());
+            let mut settings = paths.load_settings().unwrap();
+            if previously_enabled {
+                settings.enabled = true;
+                paths.save_settings(&settings).unwrap();
+            }
+            std::fs::create_dir_all(&paths.icloud).unwrap();
+            let before = std::fs::read(paths.settings()).ok();
+            for action in [
+                Action::Enable {
                     json: true,
-                    folder: None
-                }
-            )
-            .is_err()
-        );
-        std::fs::create_dir_all(&paths.icloud).unwrap();
-        assert!(
-            execute(
-                &paths,
-                &Action::Enable {
+                    folder: None,
+                },
+                Action::Enable {
                     json: true,
-                    folder: None
-                }
-            )
-            .unwrap()
-            .enabled
-        );
-        assert!(!paths.state().exists());
-        assert!(!paths.icloud.join("Switchboard").exists());
-        assert!(
-            !execute(&paths, &Action::Disable { json: true })
-                .unwrap()
-                .enabled
-        );
+                    folder: Some(home.path().join("other-archive")),
+                },
+                Action::Run { json: true },
+                Action::MapPath {
+                    json: true,
+                    from: "/old/project".into(),
+                    to: "/new/project".into(),
+                },
+            ] {
+                let failure = execute(&paths, &action).unwrap_err();
+                assert_eq!(public_error(&failure), RETIRED_MESSAGE);
+                assert_eq!(std::fs::read(paths.settings()).ok(), before);
+                assert!(!paths.state().exists());
+                assert!(!paths.report().exists());
+                assert!(!settings.folder.exists());
+            }
+            let report = execute(&paths, &Action::Status { json: true }).unwrap();
+            assert!(!report.enabled);
+            assert!(report.retired);
+            assert_eq!(report.legacy_enabled, previously_enabled);
+        }
     }
+
     #[test]
-    fn corrupt_display_cache_does_not_block_disabling_or_reading_status() {
+    fn status_and_disable_preserve_legacy_archives_native_chats_and_recovery_data() {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::at(home.path().to_path_buf());
-        std::fs::create_dir_all(&paths.icloud).unwrap();
-        execute(
-            &paths,
-            &Action::Enable {
-                json: true,
-                folder: None,
-            },
-        )
-        .unwrap();
+        let mut settings = paths.load_settings().unwrap();
+        settings.enabled = true;
+        settings
+            .mappings
+            .push(("/old/project".into(), "/new/project".into()));
+        paths.save_settings(&settings).unwrap();
+        let original_settings = std::fs::read(paths.settings()).unwrap();
+        let archive = settings
+            .folder
+            .join("codex/fixture-chat/fixture-revision.json");
+        let native = home.path().join(".codex/sessions/fixture.jsonl");
+        let files = [
+            (archive, b"synthetic immutable archive".as_slice()),
+            (native, b"synthetic native history".as_slice()),
+            (paths.state(), b"synthetic recovery journal".as_slice()),
+            (paths.report(), br#"{"enabled":true,"available":true,"sync_root":"/old","device_id":"fixture","last_sync_at":"2026-09-29T10:00:00Z","accounts":[{"id":"codex","provider":"codex","label":"Codex","state":"waiting","detail":"Will retry automatically","exported":2,"imported":1,"conflicts":0,"pending":1}],"message":"Enable on the other Mac","pending":1,"conflicts":0}"#.as_slice()),
+        ];
+        for (path, contents) in &files {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        let report = execute(&paths, &Action::Status { json: true }).unwrap();
+        assert!(!report.enabled);
+        assert!(report.legacy_enabled);
+        assert_eq!(report.device_id.as_deref(), Some("fixture"));
+        assert_eq!(report.accounts[0].counts.exported, 2);
+        assert_eq!(report.accounts[0].state, "retired");
+        assert_eq!(report.message.as_deref(), Some(RETIRED_MESSAGE));
+        assert_eq!(std::fs::read(paths.settings()).unwrap(), original_settings);
+        let disabled = execute(&paths, &Action::Disable { json: true }).unwrap();
+        assert!(!disabled.enabled);
+        assert!(!disabled.legacy_enabled);
+        let after = paths.load_settings().unwrap();
+        assert!(!after.enabled);
+        assert_eq!(after.folder, settings.folder);
+        assert_eq!(after.mappings, settings.mappings);
+        for (path, contents) in files {
+            assert_eq!(std::fs::read(path).unwrap(), contents);
+        }
+    }
+
+    #[test]
+    fn corrupt_display_cache_does_not_block_reading_status_or_disabling() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::at(home.path().to_path_buf());
+        let mut settings = paths.load_settings().unwrap();
+        settings.enabled = true;
+        paths.save_settings(&settings).unwrap();
         std::fs::write(paths.report(), b"interrupted display cache").unwrap();
         let before = std::fs::read(paths.report()).unwrap();
-        assert!(
-            execute(&paths, &Action::Status { json: true })
-                .unwrap()
-                .enabled
-        );
-        assert_eq!(std::fs::read(paths.report()).unwrap(), before);
+        let report = execute(&paths, &Action::Status { json: true }).unwrap();
+        assert!(!report.enabled);
+        assert!(report.legacy_enabled);
         assert!(
             !execute(&paths, &Action::Disable { json: true })
                 .unwrap()
-                .enabled
+                .legacy_enabled
         );
+        assert_eq!(std::fs::read(paths.report()).unwrap(), before);
         assert!(!paths.load_settings().unwrap().enabled);
         assert!(!paths.state().exists());
-        assert!(!paths.icloud.join("Switchboard").exists());
+        assert!(!settings.folder.exists());
     }
-    #[test]
-    fn existing_recovery_record_prevents_changing_transport_folder() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::at(home.path().to_path_buf());
-        std::fs::create_dir_all(&paths.icloud).unwrap();
-        execute(
-            &paths,
-            &Action::Enable {
-                json: true,
-                folder: None,
-            },
-        )
-        .unwrap();
-        State::default().save(&paths.state()).unwrap();
-        execute(&paths, &Action::Disable { json: true }).unwrap();
-        let replacement = home.path().join("different-transport");
-        std::fs::create_dir(&replacement).unwrap();
-        assert!(
-            execute(
-                &paths,
-                &Action::Enable {
-                    json: true,
-                    folder: Some(replacement.clone())
-                }
-            )
-            .is_err()
-        );
-        assert!(!paths.load_settings().unwrap().enabled);
-        assert_ne!(paths.load_settings().unwrap().folder, replacement);
-    }
+
     #[test]
     fn provider_processes_are_separate_and_fail_closed_for_helpers() {
         assert!(process_is_provider(

@@ -1,5 +1,9 @@
 # Tools and skills sync — implementation plan
 
+Historical implementation plan. Automatic chat sync was retired in build 35;
+see [manual Mac transfers](mac-transfers.md) for its replacement. The tools and
+skills library remains a separate feature.
+
 Status: implemented for build 33. See [setup and current limitations](tools-skills-sync.md).
 This document records the design; account plugin import and physical two-Mac
 verification remain distinct from automated fixture checks.

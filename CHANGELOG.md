@@ -11,10 +11,10 @@ Each release is also published at
 
 ### Added
 
-- Sync local Codex and Claude Cowork history between Macs through iCloud Drive.
-  Each app shares history across accounts while keeping sign-ins local and the
-  two apps separate. Native restoration preserves independent edits as forks,
-  waits for apps to close, and recovers interrupted transfers.
+- Transfer a selected chat or a project's selected conversations to another Mac
+  using an explicit transcript package. The receiving Mac chooses its local
+  workspace and destination app; source chats remain unchanged. Working files,
+  project registration, credentials and active execution are not transferred.
 
 - Carry the Claude Code sidebar across Desktop account switches: custom groups
   (projects), their chat assignments, and the grouping/sorting mode are
@@ -63,6 +63,11 @@ Each release is also published at
   colored only when that provider is critical. Off by default.
 
 ### Changed
+
+- Retire automatic iCloud chat sync, including its menu page and periodic checks.
+  Old enabled settings cannot trigger replication. Existing native chats, iCloud
+  archives and recovery records are preserved; legacy CLI status and disable
+  remain available.
 
 - The macOS menu bar and the GNOME extension are in English. Both shipped with
   a Brazilian Portuguese UI while the Rust core, the Omarchy panel and the KDE

@@ -121,6 +121,44 @@ struct ProjectCloneTests {
         }, openChat: { _, _ in attempts += 1; throw ContinuationHandoffError.timedOut })
         check(attempts == 1 && blocked.items[1].desktopHandoff == nil, "First handoff failure stops the batch instead of timing out every chat")
         check(progressStates == ["opening", "needs-attention"], "Opening and failure progress are emitted immediately")
+        let transferred = try ProjectCloneEngine.transferData(project: project, selected: [chats[0].id, chats[1].id], name: "Selected project chats", read: { $0.chat })
+        let package = try ContinuationTransfer.decode(transferred)
+        check(package.kind == .project && package.chats.count == 2 && package.title == "Selected project chats", "Project transfer contains only the named selected chat set")
+        let transferText = String(decoding: transferred, as: UTF8.self)
+        check(!transferText.contains(source.path) && !transferText.contains("readme.txt") && !transferText.contains("synthetic excluded value"), "Project transfer exports no workspace path, source files or excluded file contents")
+        do {
+            _ = try ProjectCloneEngine.transferData(project: project, selected: selection, name: "Unreadable", read: { entry in
+                if entry.chat.id == chats[1].id { throw ContinuationError.changed }; return entry.chat
+            })
+            fatalError("Unreadable selected chat silently omitted")
+        } catch ContinuationError.changed { check(true, "A changing selected chat fails the whole export") }
+        let importStore = ContinuationStore(root: root.appendingPathComponent("transfer-imports"))
+        do {
+            _ = try ProjectCloneEngine.prepareTransfer(chats: package.chats, name: package.title, destination: .claudeCode,
+                workspace: root.appendingPathComponent("missing-workspace"), store: importStore)
+            fatalError("Missing receiver folder accepted")
+        } catch ContinuationNativeError.workspace { check(true, "A missing receiver folder blocks project import before creating state") }
+        check(!FileManager.default.fileExists(atPath: importStore.root.path), "Invalid workspace creates no batch or native chats")
+        let destinationFolder = root.appendingPathComponent("different-user-different-folder")
+        try ContinuationFiles.directory(destinationFolder)
+        try ContinuationFiles.write(Data("existing destination file".utf8), to: destinationFolder.appendingPathComponent("keep.txt"))
+        let imported = try ProjectCloneEngine.prepareTransfer(chats: package.chats, name: package.title, destination: .claudeDesktopCode,
+            workspace: destinationFolder, store: importStore)
+        check(imported.isTransferImport && imported.workspace == destinationFolder && imported.items.allSatisfy { $0.result == nil }, "Reviewed import prepares fresh local items against only the chosen receiver folder")
+        check(try ProjectCloneEngine.load(ProjectCloneEngine.directory(imported, store: importStore)).isTransferImport, "Transfer no-auto-open policy survives restarting Switchboard")
+        let importedPartial = try ProjectCloneEngine.run(imported, store: importStore, create: { draft, bundle in
+            if draft.chat.id == package.chats[1].id { throw ContinuationError.storage }
+            return try creator(draft, bundle)
+        })
+        check(importedPartial.verifiedCount == 1, "Partial transfer failure keeps the successfully verified chat")
+        let importedID = importedPartial.items[0].result!.id
+        let importedComplete = try ProjectCloneEngine.run(imported, store: importStore, create: creator)
+        check(importedComplete.verifiedCount == 2 && importedComplete.items[0].result?.id == importedID, "Transfer retry loads durable completion without duplicating success")
+        check(importedComplete.items.allSatisfy { $0.result?.workspace == destinationFolder && $0.result?.id != $0.chat?.id }, "Every native imported chat receives a fresh ID and the receiver's folder")
+        _ = try ProjectCloneEngine.handoff(importedComplete, store: importStore, backend: nil, openChat: { _, _ in fatalError("Transfer must not open native chats automatically") })
+        check(importedComplete.desktopReadyCount == 0 && importedComplete.resultTitle == "2 of 2 chats imported", "Transfer reports verified import without claiming or triggering desktop opening")
+        check(try String(contentsOf: destinationFolder.appendingPathComponent("keep.txt"), encoding: .utf8) == "existing destination file", "Import leaves receiver working files unchanged")
+        check(!FileManager.default.fileExists(atPath: destinationFolder.appendingPathComponent("readme.txt").path), "Project transfer never reconstructs source working files")
         print("✓ \(checks) project clone checks passed; isolated synthetic stores only.")
     }
 }

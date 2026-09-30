@@ -51,6 +51,18 @@ Results report “N of M chats cloned” for native stores. Claude Desktop repor
 persistence alone is not desktop readiness. Successful manual Open saves readiness
 and clears a prior handoff issue. This is not a complete project clone.
 
+## Transfer project chats to another Mac
+
+**Export selected chats…** saves the selected readable conversations as one
+`.switchboard-transfer` package. **Import transfer…** opens a review on the
+receiving Mac. Choose its destination app, conversations and an existing local
+folder, then explicitly import. Each chat receives a new native identity; imported
+chats open only when you choose Open. Saved batch receipts support retry.
+
+This transfers project conversations, not project registration, working files,
+Git state or authentication. Set up the folder or checkout first. See
+[Mac transfers](mac-transfers.md) for the full scope and path behavior.
+
 ## Recovery
 
 The batch manifest includes frozen readable chat snapshots, destination store,
