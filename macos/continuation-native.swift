@@ -10,7 +10,7 @@ enum ContinuationNativeError: LocalizedError {
         case .protocolFailure: return "The destination could not create this conversation. Check that its CLI is up to date."
         case .verification: return "The destination history could not be verified. Retry verification."
         case .uncertain: return "Creation was interrupted. Check destination history before starting another copy. Local details are under Advanced."
-        case .workspace: return "Choose an existing project folder under Advanced."
+        case .workspace: return "Choose an existing project folder."
         }
     }
 }

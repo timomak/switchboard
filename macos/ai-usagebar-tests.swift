@@ -785,79 +785,14 @@ struct TestRunner {
         testAccountStatus()
         testSystemIntegrations()
         testSwitchboardRequests()
-        testChatSync()
         testLibrarySync()
+        testContinuationTransfers()
         if failures > 0 {
             print("\n\(failures) test(s) FAILED")
             exit(1)
         }
         print("\nall tests passed")
     }
-}
-
-func testChatSync() {
-    let data = Data(#"{"enabled":true,"available":true,"device_id":"fixture-mac","last_sync_at":"2026-09-28T12:00:00Z","accounts":[{"id":"codex","provider":"codex","label":"Codex","state":"ready","exported":3,"imported":2},{"id":"claude","provider":"claude","label":"Claude","state":"waiting","detail":"Quit Claude to restore chats."}],"pending":2,"conflicts":1}"#.utf8)
-    let status = parseChatSyncStatus(data)!
-    assertEqual(status.accounts?.map { $0.id }, ["codex", "claude"], "sync keeps provider rows separate")
-    assertEqual(status.accounts?.last?.statusLabel, "Waiting", "sync shows deferred restore state")
-    assertEqual(status.pending, 2, "sync retains deferred restoration count")
-    assertEqual(status.conflicts, 1, "sync retains preserved conflict count")
-    assertEqual(status.deviceID, "fixture-mac", "sync parses backend snake-case identity")
-    assertNotNil(chatSyncDate("2026-09-28T12:00:00Z"), "sync date accepts whole seconds")
-    assertNotNil(chatSyncDate("2026-09-28T12:00:00.123Z"), "sync date accepts fractional seconds")
-    assertNil(parseChatSyncStatus(Data(#"{"available":true}"#.utf8)), "missing enable state cannot activate sync")
-    assertNil(parseChatSyncStatus(Data(#"{"enabled":"true","available":true}"#.utf8)), "invalid enable state cannot activate sync")
-    assertEqual(chatSyncCanRun(status, preview: false, accountOperation: false), true, "enabled sync can run")
-    assertEqual(chatSyncCanRun(status, preview: true, accountOperation: false), false, "preview never syncs")
-    assertEqual(chatSyncCanRun(status, preview: false, accountOperation: true), false, "account switching defers automatic sync")
-    assertEqual(chatSyncCanRun(nil, preview: false, accountOperation: false), false, "unknown setting never syncs")
-    let unavailable = ChatSyncStatus(enabled: true, available: false)
-    assertEqual(chatSyncCanRun(unavailable, preview: false, accountOperation: false), false, "missing iCloud defers sync")
-
-    // Execute a synthetic enable/status/disable cycle with no filesystem or app
-    // access. This checks the authorization boundary, not just JSON decoding.
-    final class Fixture {
-        let lock = NSLock()
-        private var calls: [String] = []
-        private var enabled = false
-        var commands: [String] { lock.lock(); defer { lock.unlock() }; return calls }
-        func execute(_ command: String) -> ChatSyncCommandResult {
-            lock.lock(); defer { lock.unlock() }
-            calls.append(command)
-            if command == "enable" { enabled = true }
-            if command == "disable" { enabled = false }
-            return ChatSyncCommandResult(data: Data("{\"enabled\":\(enabled),\"available\":true}".utf8))
-        }
-    }
-    func waitForResult(_ model: ChatSyncModel) {
-        let deadline = Date().addingTimeInterval(2)
-        while model.busy && Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
-        }
-        assertEqual(model.busy, false, "fixture command completes")
-    }
-    let fixture = Fixture()
-    let model = ChatSyncModel(preview: false, execute: fixture.execute)
-    model.refresh(); waitForResult(model)
-    model.syncNow()
-    assertEqual(fixture.commands, ["status"], "opening disabled sync and sync-now cannot upload")
-    model.setEnabled(true); waitForResult(model)
-    assertEqual(fixture.commands, ["status", "enable", "run"], "explicit enable starts first sync")
-    model.refresh(); waitForResult(model)
-    assertEqual(fixture.commands.last, "status", "opening enabled sync remains read-only")
-    model.setEnabled(false); waitForResult(model)
-    model.refresh(thenSync: true); waitForResult(model)
-    assertEqual(fixture.commands.suffix(2), ["disable", "status"], "automatic pass respects disabled backend setting")
-    let previewFixture = Fixture()
-    let preview = ChatSyncModel(status: status, preview: true, execute: previewFixture.execute)
-    preview.setEnabled(false); preview.syncNow()
-    assertEqual(previewFixture.commands, [], "preview blocks all sync mutations")
-    let failed = ChatSyncModel(status: status, preview: false, execute: { _ in
-        ChatSyncCommandResult(data: Data(#"{"enabled":false,"available":false,"message":"The sync folder is unavailable."}"#.utf8), succeeded: false)
-    })
-    failed.syncNow(); waitForResult(failed)
-    assertEqual(failed.status?.enabled, true, "failed command cannot silently disable displayed sync setting")
-    assertEqual(failed.message, "The sync folder is unavailable.", "safe backend error reaches sync UI")
 }
 
 func testLibrarySync() {
@@ -985,4 +920,59 @@ func testSwitchboardRequests() {
     assertEqual(continuationScript.contains("cd -- '/fixture/a'\\''b $(touch never)'"), true, "continuation directory is shell quoted")
     assertEqual(continuationScript.contains("set -e"), true, "failed directory selection cannot launch in another project")
 
+}
+
+
+@MainActor
+func testContinuationTransfers() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("switchboard-transfer-model-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    func waitForResult(_ model: ContinuationModel) {
+        let deadline = Date().addingTimeInterval(5)
+        while model.busy && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        assertEqual(model.busy, false, "transfer model finishes its bounded synthetic operation")
+    }
+    do {
+        try ContinuationFiles.directory(root)
+        let chat = try ContinuationChat.make(surface: .claudeCode, title: "Portable fixture",
+            messages: [.init(role: "User", text: "Historical /Users/source/project path"), .init(role: "Assistant", text: "Reply")])
+        let file = root.appendingPathComponent("fixture." + ContinuationTransfer.fileExtension)
+        try ContinuationTransfer.write(ContinuationTransfer.encode(chats: [chat], title: chat.title, kind: .chat), to: file)
+        let store = ContinuationStore(root: root.appendingPathComponent("imports"))
+        let model = ContinuationModel(store: store, simulateExternalActions: true)
+        model.importTransfer(file); waitForResult(model)
+        assertEqual(model.page == .review, true, "received transfer opens review before native creation")
+        assertEqual(model.source, .claudeCode, "import selects the transfer source for later navigation")
+        assertEqual(model.draft?.requiresWorkspace, true, "received transfer requires a receiver project folder")
+        assertNil(model.draft?.workspace, "transfer never inherits the sender workspace")
+        assertNil(model.bundle, "import alone creates no native staging bundle")
+        assertNil(model.nativeResult, "import alone creates no native result")
+        assertEqual(try FileManager.default.contentsOfDirectory(atPath: store.root.path), ["library.json"], "import writes only private transcript preview")
+        var opened = 0
+        model.prepare { opened += 1 }
+        assertNil(model.bundle, "Continue without chosen folder cannot stage or create a chat")
+        model.draft?.workspace = root
+        model.prepare { opened += 1 }; waitForResult(model)
+        assertNotNil(model.bundle, "explicit Continue with receiver folder stages the synthetic copy")
+        assertEqual(opened, 0, "received chat never opens a destination automatically after Continue")
+        assertEqual(model.page == .ready, true, "received chat stops at results for explicit Open")
+        let local = ContinuationModel(store: ContinuationStore(root: root.appendingPathComponent("local-clone")), simulateExternalActions: true)
+        local.draft = ContinuationDraft(chat: chat, destination: .claudeCode)
+        local.prepare { opened += 1 }; waitForResult(local)
+        assertEqual(opened, 1, "ordinary local cloning retains its existing open callback")
+        let projectFile = root.appendingPathComponent("project." + ContinuationTransfer.fileExtension)
+        try ContinuationTransfer.write(ContinuationTransfer.encode(chats: [chat], title: "Project", kind: .project), to: projectFile)
+        let rejectedStore = ContinuationStore(root: root.appendingPathComponent("not-written"))
+        let wrongKind = ContinuationModel(store: rejectedStore, simulateExternalActions: true)
+        wrongKind.importTransfer(projectFile); waitForResult(wrongKind)
+        assertEqual(wrongKind.message?.contains("Clone project → Import transfer"), true, "project package directs the user to the project flow")
+        assertEqual(FileManager.default.fileExists(atPath: rejectedStore.root.path), false, "wrong package kind writes no import or native state")
+        let invalid = root.appendingPathComponent("invalid." + ContinuationTransfer.fileExtension)
+        try ContinuationTransfer.write(Data("{\"credentials\":\"synthetic\"}".utf8), to: invalid)
+        wrongKind.importTransfer(invalid); waitForResult(wrongKind)
+        assertEqual(FileManager.default.fileExists(atPath: rejectedStore.root.path), false, "invalid package writes no import or native state")
+    } catch {
+        failures += 1
+        print("  ✗ transfer model fixture failed: \(error)")
+    }
 }

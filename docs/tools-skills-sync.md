@@ -1,7 +1,7 @@
 # Tools & skills
 
 Switchboard shares selected personal skill folders and MCP setups through
-`iCloud Drive/Switchboard/Tools & Skills`. Chat sync is separate. Definitions are
+`iCloud Drive/Switchboard/Tools & Skills`. Automatic chat sync is retired; [manual chat transfers](mac-transfers.md) are separate. Definitions are
 shared across accounts; each app and account keeps its own authentication.
 
 ## Set up both Macs

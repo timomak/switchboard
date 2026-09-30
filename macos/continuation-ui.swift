@@ -75,6 +75,79 @@ final class ContinuationModel: ObservableObject {
             guard let self, self.generation == token else { return }; self.busy = false
         }
     }
+    func chooseTransfer() {
+        guard !busy else { return }
+        protectPopover(true); defer { protectPopover(false) }
+        let panel = NSOpenPanel(); panel.title = "Import chat transfer"
+        panel.allowedContentTypes = [UTType(filenameExtension: ContinuationTransfer.fileExtension) ?? .data]
+        panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
+        panel.message = "Choose a chat exported by Switchboard on another Mac. Import adds a local preview; Continue creates the native chat."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        importTransfer(url)
+    }
+    func importTransfer(_ url: URL) {
+        guard !busy else { return }
+        let token = UUID(); generation = token; busy = true; message = nil
+        work = Task { [weak self] in
+            let worker = Task.detached(priority: .userInitiated) {
+                try ContinuationTransfer.decode(ContinuationFiles.read(url, limit: ContinuationLimits.input))
+            }
+            do {
+                let package = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+                guard let self, self.generation == token, !Task.isCancelled else { return }
+                guard package.kind == .chat else {
+                    self.message = "This is a project transfer. Use Clone project → Import transfer…"; self.busy = false; return
+                }
+                try self.add(package.chats)
+                self.source = package.chats[0].surface
+                self.beginReview(package.chats[0])
+            } catch {
+                guard let self, self.generation == token, !Task.isCancelled else { return }
+                self.message = (error as? LocalizedError)?.errorDescription ?? "Could not read this transfer. Export it again on the source Mac."
+            }
+            guard let self, self.generation == token else { return }; self.busy = false
+        }
+    }
+    func chooseWorkspace() {
+        protectPopover(true); defer { protectPopover(false) }
+        let panel = NSOpenPanel(); panel.title = "Choose project folder on this Mac"
+        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
+        panel.message = "Choose the existing project checkout or working folder. The transfer does not copy or set up project files."
+        if panel.runModal() == .OK { draft?.workspace = panel.url }
+    }
+    func exportTransfer() {
+        guard let draft, !busy else { return }
+        protectPopover(true); defer { protectPopover(false) }
+        let panel = NSSavePanel(); panel.title = "Export chat for another Mac"
+        panel.allowedContentTypes = [UTType(filenameExtension: ContinuationTransfer.fileExtension) ?? .data]
+        panel.nameFieldStringValue = "Chat." + ContinuationTransfer.fileExtension
+        panel.message = "Save to iCloud Drive or share this file. Only the selected message text, summary and next step are included. Files and account logins stay here."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let token = UUID(); generation = token; busy = true; message = nil
+        work = Task { [weak self] in
+            let worker = Task.detached(priority: .userInitiated) {
+                var messages = Array(draft.chat.messages.dropFirst(draft.firstMessage))
+                var additions: [String] = []
+                if !draft.summary.isEmpty { additions.append("Summary supplied during transfer:\n" + draft.summary) }
+                if !draft.nextStep.isEmpty && draft.nextStep != "Continue from the last request." { additions.append("Next step:\n" + draft.nextStep) }
+                if !additions.isEmpty { messages.append(.init(role: "User", text: additions.joined(separator: "\n\n"))) }
+                let chat = try ContinuationChat.make(surface: draft.chat.surface, title: draft.chat.title,
+                    messages: messages, omissions: draft.omissions)
+                let bytes = try ContinuationTransfer.encode(chats: [chat], title: chat.title, kind: .chat)
+                try Task.checkCancellation()
+                try ContinuationTransfer.write(bytes, to: url)
+            }
+            do {
+                try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+                guard let self, self.generation == token, !Task.isCancelled else { return }
+                self.message = "Chat exported. On the other Mac, choose Continue in another app → Import transfer… and select its local project folder. The source chat is unchanged."
+            } catch {
+                guard let self, self.generation == token, !Task.isCancelled else { return }
+                self.message = (error as? LocalizedError)?.errorDescription ?? "Could not save the transfer. Choose another location."
+            }
+            guard let self, self.generation == token else { return }; self.busy = false
+        }
+    }
     func chooseFiles() {
         protectPopover(true); defer { protectPopover(false) }
         let panel = NSOpenPanel(); panel.title = "Import conversations"
@@ -149,7 +222,10 @@ final class ContinuationModel: ObservableObject {
     }
     private func beginReview(_ selected: ContinuationChat) {
         draft = ContinuationDraft(chat: selected, destination: selected.surface == .claudeChat || selected.surface == .claudeCode ? .codexDesktop : .claudeDesktopCode)
-        if let workspace = localChats[selected.id]?.workspace,
+        if selected.omissions.contains(ContinuationTransfer.disclosure) {
+            draft?.requiresWorkspace = true
+            if selected.surface != .claudeChat { draft?.destination = selected.surface }
+        } else if let workspace = localChats[selected.id]?.workspace,
            FileManager.default.fileExists(atPath: workspace.path) { draft?.workspace = workspace }
         bundle = nil; nativeResult = nil
         message = nil; copied = false; openedClaude = false; page = .review
@@ -199,7 +275,9 @@ final class ContinuationModel: ObservableObject {
                     self.nativeResult = try await creator.value
                 }
                 self.page = .ready; self.busy = false; self.protectPopover(false)
-                onReady?()
+                // Received transfers stop at verified creation. Opening is a
+                // separate explicit action on the receiving Mac.
+                if !draft.requiresWorkspace { onReady?() }
             } catch {
                 guard let self else { return }
                 if let bundle = self.bundle { self.nativeResult = try? ContinuationNative.saved(bundle) }
@@ -366,6 +444,7 @@ struct ContinuationView: View {
         Group {
             Text("1 OF 2").font(.caption).foregroundStyle(.secondary)
             Text("Choose a conversation").font(.title3).fontWeight(.semibold)
+            Button("Import transfer…") { model.chooseTransfer() }.disabled(model.busy)
             Picker("From", selection: $model.source) {
                 ForEach(ContinuationSurface.sources) { Text($0.title).tag($0) }
             }.onChange(of: model.source) { _, _ in model.selectedID = nil; model.query = ""; model.refresh() }
@@ -434,6 +513,16 @@ struct ContinuationView: View {
                 if draft.destination == .claudeChat && !draft.contextOnly {
                     Text("Chat supports context handoff only.").font(.caption).foregroundStyle(.secondary)
                 }
+                if draft.requiresWorkspace {
+                    HStack {
+                        Text(draft.workspace?.path ?? "Choose a local project folder to continue.").lineLimit(2).font(.caption)
+                        Spacer()
+                        Button("Choose folder…") { model.chooseWorkspace() }
+                    }
+                    Text("Text only. Set up the project on this Mac first. Old paths in messages stay unchanged.").font(.caption).foregroundStyle(.secondary)
+                }
+                Button("Export for another Mac…") { model.exportTransfer() }
+                Text("Export copies the selected message text. Files and logins are not transferred.").font(.caption).foregroundStyle(.secondary)
                 DisclosureGroup("Advanced", isExpanded: $advanced) {
                     VStack(alignment: .leading, spacing: 10) {
                         Toggle("Context handoff instead of clone", isOn: binding(\.contextOnly, fallback: false))
@@ -446,13 +535,11 @@ struct ContinuationView: View {
                                 ForEach(draft.omissions, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
                             }
                         }
-                        HStack {
-                            Text(draft.workspace?.lastPathComponent ?? "No project folder").lineLimit(1)
-                            Spacer()
-                            Button("Choose…") {
-                                model.protectPopover(true); defer { model.protectPopover(false) }
-                                let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
-                                if panel.runModal() == .OK { model.draft?.workspace = panel.url }
+                        if !draft.requiresWorkspace {
+                            HStack {
+                                Text(draft.workspace?.lastPathComponent ?? "No project folder").lineLimit(1)
+                                Spacer()
+                                Button("Choose…") { model.chooseWorkspace() }
                             }
                         }
                         Stepper("Start at message \(draft.firstMessage + 1)", value: binding(\.firstMessage, fallback: 0), in: 0...max(0, draft.chat.messages.count - 1))

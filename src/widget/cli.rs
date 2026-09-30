@@ -142,7 +142,7 @@ pub enum Command {
         #[command(subcommand)]
         action: crate::library_sync::Action,
     },
-    /// Sync native Codex and Claude chat histories between Macs through iCloud.
+    /// Inspect or disable retired automatic chat sync; existing archives are kept.
     ChatSync {
         #[command(subcommand)]
         action: crate::chat_sync::Action,

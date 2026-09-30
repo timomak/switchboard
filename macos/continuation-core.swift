@@ -62,6 +62,104 @@ struct ContinuationChat: Codable, Identifiable, Equatable {
     }
 }
 
+enum ContinuationTransferKind: String, Codable { case chat, project }
+
+struct ContinuationTransferPackage {
+    let kind: ContinuationTransferKind
+    let title: String
+    let chats: [ContinuationChat]
+}
+
+enum ContinuationTransferError: LocalizedError {
+    case version, duplicate
+    var errorDescription: String? {
+        switch self {
+        case .version: return "This transfer uses an unsupported version. Update Switchboard or export it again."
+        case .duplicate: return "This transfer contains duplicate transcripts. Export only one copy of each conversation."
+        }
+    }
+}
+
+/// A deliberately small file format: visible transcript data, never native stores,
+/// receipts, destination IDs, workspace paths, credentials or executable settings.
+enum ContinuationTransfer {
+    static let fileExtension = "switchboard-transfer"
+    static let disclosure = "Text-only transfer. Files, native attachments, instructions, tools and running work are not included. Historical paths in messages are unchanged; choose an existing folder on this Mac."
+    private static let format = "switchboard-transcript-transfer"
+    private struct Chat: Codable {
+        let surface: ContinuationSurface
+        let title: String
+        let messages: [ContinuationMessage]
+        let omissions: [String]
+    }
+    private struct Envelope: Codable {
+        let format: String
+        let version: Int
+        let kind: ContinuationTransferKind
+        let title: String
+        let chats: [Chat]
+    }
+    private static func validTitle(_ title: String) -> Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && title.count <= 120 && title.utf8.count <= 512 &&
+            !title.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+    }
+    private static func validate(_ input: Envelope) throws -> ContinuationTransferPackage {
+        guard input.format == format else { throw ContinuationError.invalid }
+        guard input.version == 1 else { throw ContinuationTransferError.version }
+        guard validTitle(input.title), !input.chats.isEmpty, input.chats.count <= ContinuationLimits.chats,
+              input.kind != .chat || input.chats.count == 1 else { throw ContinuationError.invalid }
+        var bytes = 0
+        let chats = try input.chats.map { chat -> ContinuationChat in
+            guard ContinuationSurface.sources.contains(chat.surface), validTitle(chat.title), !chat.messages.isEmpty, chat.messages.count <= 10_000,
+                  chat.omissions.count <= 64, chat.omissions.allSatisfy({ $0.utf8.count <= 1024 && !$0.contains("\0") }) else { throw ContinuationError.invalid }
+            for message in chat.messages {
+                guard ["User", "Assistant", "Transcript"].contains(message.role), !message.text.contains("\0"),
+                      message.timestamp.map({ $0.utf8.count <= 128 && !$0.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } }) ?? true else { throw ContinuationError.invalid }
+                bytes += message.text.utf8.count
+                guard bytes <= 40 * 1024 * 1024 else { throw ContinuationError.tooLarge }
+            }
+            return try ContinuationChat.make(surface: chat.surface, title: chat.title, messages: chat.messages,
+                omissions: Array(Set(chat.omissions + [disclosure])).sorted())
+        }
+        guard Set(chats.map(\.id)).count == chats.count else { throw ContinuationTransferError.duplicate }
+        return .init(kind: input.kind, title: input.title, chats: chats)
+    }
+    static func encode(chats: [ContinuationChat], title: String, kind: ContinuationTransferKind) throws -> Data {
+        let input = Envelope(format: format, version: 1, kind: kind, title: title,
+            chats: chats.map { Chat(surface: $0.surface, title: $0.title, messages: $0.messages,
+                omissions: $0.omissions.filter { $0 != disclosure }) })
+        _ = try validate(input)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let bytes = try encoder.encode(input)
+        guard bytes.count <= ContinuationLimits.input else { throw ContinuationError.tooLarge }
+        return bytes
+    }
+    static func write(_ data: Data, to url: URL) throws {
+        guard url.isFileURL, data.count <= ContinuationLimits.input else { throw ContinuationError.invalid }
+        let temp = url.deletingLastPathComponent().appendingPathComponent(".transfer-\(UUID()).tmp")
+        defer { try? FileManager.default.removeItem(at: temp) }
+        try ContinuationFiles.write(data, to: temp)
+        guard rename(temp.path, url.path) == 0 else { throw ContinuationError.storage }
+    }
+    static func decode(_ data: Data) throws -> ContinuationTransferPackage {
+        guard data.count <= ContinuationLimits.input else { throw ContinuationError.tooLarge }
+        // Reject extra keys, rather than silently accepting a native account/config
+        // object under an otherwise recognizable transfer envelope.
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(object.keys) == Set(["format", "version", "kind", "title", "chats"]),
+              let chats = object["chats"] as? [[String: Any]], !chats.isEmpty, chats.count <= ContinuationLimits.chats else { throw ContinuationError.invalid }
+        for chat in chats {
+            guard Set(chat.keys) == Set(["surface", "title", "messages", "omissions"]),
+                  let messages = chat["messages"] as? [[String: Any]], !messages.isEmpty, messages.count <= 10_000 else { throw ContinuationError.invalid }
+            for message in messages {
+                let keys = Set(message.keys)
+                guard keys == Set(["role", "text"]) || keys == Set(["role", "text", "timestamp"]) else { throw ContinuationError.invalid }
+            }
+        }
+        return try validate(JSONDecoder().decode(Envelope.self, from: data))
+    }
+}
+
 enum ContinuationLimits {
     static let input = 100 * 1024 * 1024
     static let transcript = 5 * 1024 * 1024
@@ -232,6 +330,7 @@ struct ContinuationDraft {
     var files: [ContinuationAttachment] = []
     var omissionsReviewed = true
     var contextOnly = false
+    var requiresWorkspace = false
     var context: String {
         let selection = chat.messages.dropFirst(firstMessage)
         let transcript = selection.map { message in
@@ -255,6 +354,11 @@ struct ContinuationDraft {
         chat.omissions + (firstMessage > 0 ? ["\(firstMessage) earlier messages excluded."] : [])
     }
     func validate() throws {
+        if requiresWorkspace {
+            guard let workspace else { throw ContinuationNativeError.workspace }
+            var isDirectory: ObjCBool = false
+            guard workspace.isFileURL, FileManager.default.fileExists(atPath: workspace.path, isDirectory: &isDirectory), isDirectory.boolValue else { throw ContinuationNativeError.workspace }
+        }
         guard chat.messages.indices.contains(firstMessage) else { throw ContinuationError.invalid }
         guard context.utf8.count <= (contextOnly ? ContinuationLimits.inlineContext : ContinuationLimits.transcript + 100_000),
               files.count <= ContinuationLimits.files,

@@ -70,7 +70,6 @@ struct BoardAccountMenu: NSViewRepresentable {
 }
 
 final class SwitchboardModel: ObservableObject {
-    let chatSync = ChatSyncModel()
     let librarySync = LibrarySyncModel()
     @Published var viewport = NSSize(width: 420, height: 600)
     @Published var status: AccountStatus?
@@ -135,16 +134,7 @@ struct AccountSwitchboard: View {
     private var status: AccountStatus { model.status ?? AccountStatus() }
 
     var body: some View {
-        if page == "chat-sync" {
-            ChatSyncView(model: model.chatSync, height: min(520, model.viewport.height),
-                accountOperation: model.busy, close: { page = "accounts" })
-                .frame(width: model.viewport.width)
-                .onAppear {
-                    let height = min(520, model.viewport.height)
-                    model.measuredHeight = height
-                    model.resize(NSSize(width: model.viewport.width, height: height))
-                }
-        } else if page == "library-sync" {
+        if page == "library-sync" {
             LibrarySyncView(model: model.librarySync, height: min(580, model.viewport.height),
                 accountOperation: model.busy, close: { page = "accounts" })
                 .frame(width: model.viewport.width)
@@ -204,10 +194,6 @@ struct AccountSwitchboard: View {
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 12)
                 }.buttonStyle(.plain).foregroundStyle(Color.accentColor)
                     .disabled(model.busy || SWITCHBOARD_PREVIEW)
-                Button { page = "chat-sync" } label: {
-                    Label("Chat sync…", systemImage: "icloud")
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 12)
-                }.buttonStyle(.plain).foregroundStyle(Color.accentColor)
                 Button { page = "library-sync" } label: {
                     Label("Tools & skills…", systemImage: "shippingbox")
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 12)
@@ -217,7 +203,6 @@ struct AccountSwitchboard: View {
             } else {
                 VStack(alignment: .leading, spacing: 16) {
                     Button("Manage accounts…") { page = "manage" }
-                    Button("Chat sync…") { page = "chat-sync" }
                     Button("Tools & skills…") { page = "library-sync" }
                     Divider()
                     Toggle("Compact menu-bar icon", isOn: $iconOnly)

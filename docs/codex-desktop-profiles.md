@@ -29,8 +29,9 @@ Codex session transcripts, project configuration, databases, or automation
 definitions. Local availability in the app still depends on the official
 client and the selected account's permissions; this does not transfer cloud
 account ownership or subscription entitlements. The separate
-[Chat sync](chat-sync.md) feature transfers native local history between Macs;
-it does not change this login-only switching behavior.
+[manual Mac transfer](mac-transfers.md) feature copies selected conversation text
+into fresh native sessions; it does not change this login-only switching behavior.
+Automatic whole-store chat sync is [retired](chat-sync.md).
 
 Requires macOS, the official Codex desktop app, a Codex executable supporting
 `app-server --stdio`, and file-backed ChatGPT authentication. API-key accounts

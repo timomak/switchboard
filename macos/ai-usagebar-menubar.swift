@@ -1829,7 +1829,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.title = "5h …"
         buildMenu()
         configureSwitchboard()
-        board.chatSync.start { [weak self] in self?.accountSwitchInFlight != false }
         board.librarySync.start { [weak self] in self?.accountSwitchInFlight != false }
         rebuildVendorSubmenu()
         observeAppearanceChanges()
