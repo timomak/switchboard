@@ -237,7 +237,10 @@ enum ContinuationNative {
     static func executable(_ name: String, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL? {
         var roots = [home.appendingPathComponent(".local/bin").path, "/opt/homebrew/bin", "/usr/local/bin"]
         roots += (ProcessInfo.processInfo.environment["PATH"] ?? "").components(separatedBy: ":")
-        if name == "codex" { roots += ["/Applications/Codex.app/Contents/Resources"] }
+        if name == "codex" {
+            roots += ["/Applications/Codex.app/Contents/Resources",
+                      "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS"]
+        }
         return roots.filter { !$0.isEmpty }.map { URL(fileURLWithPath: $0).appendingPathComponent(name) }
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
