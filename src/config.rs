@@ -1054,6 +1054,23 @@ impl Config {
     }
 
     pub fn load_from(path: &std::path::Path) -> Result<Self> {
+        let config = Self::load_from_read_only(path)?;
+        #[cfg(unix)]
+        if path.exists() {
+            config.protect_inline_secrets(path)?;
+        }
+        Ok(config)
+    }
+
+    /// Inspect configuration without changing its permissions or contents.
+    pub(crate) fn load_read_only() -> Result<Self> {
+        match resolved_path() {
+            Some(path) => Self::load_from_read_only(&path),
+            None => Ok(Self::default()),
+        }
+    }
+
+    fn load_from_read_only(path: &std::path::Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(s) => {
                 let mut config: Self = toml::from_str(&s)?;
@@ -1062,8 +1079,6 @@ impl Config {
                 // silently pointed at a directory named `~`.
                 config.expand_paths();
                 config.validate()?;
-                #[cfg(unix)]
-                config.protect_inline_secrets(path)?;
                 Ok(config)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
@@ -1622,6 +1637,20 @@ enabled = false
     fn malformed_toml_returns_error() {
         let f = write_toml("this is not = = valid");
         assert!(Config::load_from(f.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_load_preserves_inline_secret_config_permissions() {
+        let file = write_toml("[zai]\napi_key = \"test-inline-key\"\n");
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        let before = std::fs::read(file.path()).unwrap();
+        Config::load_from_read_only(file.path()).unwrap();
+        assert_eq!(std::fs::read(file.path()).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(file.path()).unwrap().mode() & 0o777,
+            0o644
+        );
     }
 
     #[cfg(unix)]

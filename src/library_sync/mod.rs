@@ -6,6 +6,7 @@ mod engine_tests;
 mod mcp;
 mod model;
 mod native;
+mod preview;
 mod skills;
 #[cfg(test)]
 mod smoke_tests;
@@ -36,6 +37,15 @@ pub enum Action {
         #[arg(long)]
         json: bool,
     },
+    /// Preview one candidate or library item without changing any files.
+    Plan {
+        id: String,
+        /// Required for an inventory candidate; omit for an adopted library item.
+        #[arg(long)]
+        targets: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     Enable {
         #[arg(long)]
         kind: Category,
@@ -49,6 +59,9 @@ pub enum Action {
         json: bool,
     },
     Run {
+        /// Recover, publish and install only this library item.
+        #[arg(long)]
+        item: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -56,6 +69,9 @@ pub enum Action {
         id: String,
         #[arg(long)]
         targets: String,
+        /// Publish the selection without running sync. Automatic sync may still install it.
+        #[arg(long)]
+        no_sync: bool,
         #[arg(long)]
         json: bool,
     },
@@ -189,7 +205,7 @@ impl Paths {
 }
 
 fn roots(home: &Path) -> Result<NativeRoots> {
-    let config = crate::config::Config::load()?;
+    let config = crate::config::Config::load_read_only().map_err(|_| error("Switchboard account configuration is unreadable. Repair it before previewing or syncing tools."))?;
     let mut codex_homes = vec![home.join(".codex")];
     if let Some(path) = std::env::var_os("CODEX_HOME") {
         codex_homes.push(PathBuf::from(path));
@@ -322,6 +338,7 @@ fn sync(
     settings: &Settings,
     adapter: &mut NativeAdapter<'_>,
     mut report: Value,
+    selected: Option<&str>,
 ) -> Result<Value> {
     if (!settings.sync_skills && !settings.sync_mcp) || !paths.available() {
         return Ok(report);
@@ -354,9 +371,28 @@ fn sync(
         kinds.insert(Kind::Mcp);
     }
     let mut state = engine::State::load(&paths.state())?;
-    let result = engine::run(&paths.cloud, &paths.state(), &mut state, &kinds, adapter)?;
-    cowork::check_updates(&paths.cloud, &paths.local)?;
-    report["items"] = json!(public_items(&result.items));
+    let result = if selected.is_some() {
+        engine::run_selected(
+            &paths.cloud,
+            &paths.state(),
+            &mut state,
+            &kinds,
+            adapter,
+            selected,
+        )?
+    } else {
+        engine::run(&paths.cloud, &paths.state(), &mut state, &kinds, adapter)?
+    };
+    if selected.is_none() {
+        cowork::check_updates(&paths.cloud, &paths.local)?;
+        report["items"] = json!(public_items(&result.items));
+    } else {
+        // Keep unrelated status rows, without recovering/exporting/installing those items.
+        let mut rows = report["items"].as_array().cloned().unwrap_or_default();
+        rows.retain(|row| row["id"].as_str() != selected);
+        rows.extend(public_items(&result.items));
+        report["items"] = json!(rows);
+    }
     report["last_sync_at"] =
         json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
     report["message"] = json!(if result.conflicts > 0 {
@@ -367,12 +403,21 @@ fn sync(
         "Your selected library is up to date. Cowork plugin imports are handled separately."
     });
     report["cowork"] = cowork::status(&paths.local)?;
+    if selected.is_some() {
+        report["message"] = json!(
+            "Only the selected item was checked. Review its destinations for pending setup, conflicts or busy apps; other items were not synced."
+        );
+    }
     atomic_write(&paths.report(), &serde_json::to_vec(&report)?)?;
+    if let Some(id) = selected {
+        report["selected_item"] = json!(id);
+        report["items"] = json!(public_items(&result.items));
+    }
     Ok(report)
 }
 
 fn execute(paths: &Paths, action: &Action) -> Result<Value> {
-    let mut settings = paths.load()?;
+    let settings = paths.load()?;
     let report = status(paths, &settings)?;
     if matches!(action, Action::Status { .. })
         || (matches!(action, Action::Run { .. }) && !settings.sync_skills && !settings.sync_mcp)
@@ -380,16 +425,40 @@ fn execute(paths: &Paths, action: &Action) -> Result<Value> {
         return Ok(report);
     }
     let ready = |target| idle(target);
-    let mut adapter = NativeAdapter::new(
+    let adapter = NativeAdapter::new(
         roots(&paths.home)?,
         paths.local.join("native"),
         settings.bindings.clone(),
         &ready,
     );
+    execute_with_adapter(paths, action, settings, report, adapter)
+}
+
+fn execute_with_adapter(
+    paths: &Paths,
+    action: &Action,
+    mut settings: Settings,
+    report: Value,
+    mut adapter: NativeAdapter<'_>,
+) -> Result<Value> {
     if matches!(action, Action::Inventory { .. }) {
         let mut report = report;
         report["inventory"] = json!(public_inventory(&adapter.inventory()?));
         return Ok(report);
+    }
+    if let Action::Plan {
+        id,
+        targets: destinations,
+        ..
+    } = action
+    {
+        return preview::plan(
+            paths,
+            &settings,
+            &mut adapter,
+            id,
+            destinations.as_deref().map(targets).transpose()?,
+        );
     }
     private_dir(&paths.local)?;
     let _lock = crate::cache::acquire_lock(&paths.local.join("sync.lock"), Duration::from_secs(2))?;
@@ -407,7 +476,9 @@ fn execute(paths: &Paths, action: &Action) -> Result<Value> {
             }
             paths.save(&settings)?;
         }
-        Action::Run { .. } => return sync(paths, &settings, &mut adapter, report),
+        Action::Run { item, .. } => {
+            return sync(paths, &settings, &mut adapter, report, item.as_deref());
+        }
         Action::ConfirmCowork { version, .. } => cowork::confirm(&paths.local, version)?,
         Action::ExportCowork { .. } => {
             if !paths.available() {
@@ -476,26 +547,32 @@ fn execute(paths: &Paths, action: &Action) -> Result<Value> {
             }
             private_dir(&paths.cloud)?;
             let mut state = engine::State::load(&paths.state())?;
+            let mut adopted_id = None;
             match action {
                 Action::Adopt {
                     id,
                     targets: destinations,
+                    no_sync,
                     ..
                 } => {
                     let candidate = adapter.inventory()?.into_iter().find(|c| c.id == *id).ok_or_else(||error("This item changed or moved. Refresh the inventory and choose it again."))?;
-                    if !candidate.content.as_ref().is_some_and(|c| match c.kind() {
-                        Kind::Skill => settings.sync_skills,
-                        Kind::Mcp => settings.sync_mcp,
+                    if !candidate.content.as_ref().is_some_and(|c| {
+                        *no_sync
+                            || match c.kind() {
+                                Kind::Skill => settings.sync_skills,
+                                Kind::Mcp => settings.sync_mcp,
+                            }
                     }) {
                         return Err(error("Enable sync for this kind before adopting it."));
                     }
-                    engine::select(
+                    let item = engine::select(
                         &paths.cloud,
                         &paths.state(),
                         &mut state,
                         &candidate,
                         targets(destinations)?,
                     )?;
+                    adopted_id = Some(item.id);
                 }
                 Action::Targets {
                     id, targets: value, ..
@@ -514,12 +591,20 @@ fn execute(paths: &Paths, action: &Action) -> Result<Value> {
                 _ => unreachable!(),
             }
             let mut report = report;
+            if matches!(action, Action::Adopt { no_sync: true, .. }) {
+                report["adopted_item"] = json!(adopted_id);
+                report["message"] = json!(
+                    "Selection published; no sync was run. Automatic sync on enabled Macs may still install it."
+                );
+                report["items"] = json!(public_items(&engine::list(&paths.cloud)?));
+                return Ok(report);
+            }
             cowork::check_updates(&paths.cloud, &paths.local)?;
             report["items"] = json!(public_items(&engine::list(&paths.cloud)?));
             atomic_write(&paths.report(), &serde_json::to_vec(&report)?)?;
-            return sync(paths, &settings, &mut adapter, report);
+            return sync(paths, &settings, &mut adapter, report, None);
         }
-        Action::Status { .. } | Action::Inventory { .. } => unreachable!(),
+        Action::Status { .. } | Action::Inventory { .. } | Action::Plan { .. } => unreachable!(),
     }
     status(paths, &settings)
 }
@@ -532,9 +617,10 @@ pub fn run(action: &Action) -> i32 {
     let json = match action {
         Action::Status { json }
         | Action::Inventory { json }
+        | Action::Plan { json, .. }
         | Action::Enable { json, .. }
         | Action::Disable { json, .. }
-        | Action::Run { json }
+        | Action::Run { json, .. }
         | Action::Adopt { json, .. }
         | Action::Targets { json, .. }
         | Action::SetEnabled { json, .. }
@@ -578,10 +664,22 @@ pub fn run(action: &Action) -> i32 {
 mod tests {
     use super::*;
     #[test]
+    fn malformed_configuration_error_never_exposes_source_values() {
+        let parse = toml::from_str::<crate::config::Config>("[zai]\napi_key = 'PRIVATE_SENTINEL\n")
+            .unwrap_err();
+        assert!(!public_error(&parse.into()).contains("PRIVATE_SENTINEL"));
+    }
+    #[test]
     fn disabled_status_and_run_are_read_only() {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::at(home.path().to_path_buf());
-        for action in [Action::Status { json: true }, Action::Run { json: true }] {
+        for action in [
+            Action::Status { json: true },
+            Action::Run {
+                json: true,
+                item: None,
+            },
+        ] {
             let report = execute(&paths, &action).unwrap();
             assert_eq!(report["sync_skills"], false);
             assert_eq!(report["sync_mcp"], false);
