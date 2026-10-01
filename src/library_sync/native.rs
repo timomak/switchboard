@@ -647,7 +647,7 @@ impl<'a> NativeAdapter<'a> {
         }
         let observed = self.inspect(target, item, locator)?;
         if !item.active() {
-            if observed.is_some() {
+            if let Some(observed) = &observed {
                 let owned = if dest.kind == Kind::Mcp {
                     let entries = native_entries(&dest.path, target)?;
                     if let Some(entry) = entries.get(&item.name) {
@@ -658,7 +658,7 @@ impl<'a> NativeAdapter<'a> {
                         false
                     }
                 } else {
-                    let digest = content_digest(observed.as_ref().unwrap())?;
+                    let digest = content_digest(observed)?;
                     self.read_stamp(locator, &item.name)?
                         .is_some_and(|s| s.entry_hash == digest)
                 };

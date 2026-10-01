@@ -97,6 +97,9 @@ credential values; paths still identify local accounts, so keep the output
 private. A plan is a snapshot, not a reservation. Apply rechecks process
 readiness, ownership and concurrent native changes. Local edits and interrupted
 operations may require review or recovery followed by another plan.
+An unreadable iCloud directory reports access denied with its local path rather
+than appearing as an empty library. A missing library ID reports that delivery
+may still be pending; it does not ask for inventory-candidate targets.
 
 `--no-sync` permits adopting while the category is paused and leaves it paused,
 but **still publishes the selection to iCloud**. Automatic sync on any

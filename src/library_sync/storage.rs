@@ -1,8 +1,8 @@
 use super::model::{Content, LibraryItem};
-use crate::Result;
 pub use crate::chat_sync::engine::{
     atomic_write, digest, error, private_dir, read_regular, safe_child,
 };
+use crate::{AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -12,6 +12,66 @@ pub const VERSION: u32 = 1;
 pub const MAX_PACKAGE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_SCAN_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_REVISIONS: usize = 10_000;
+
+fn archive_io_error(path: &Path, source: std::io::Error) -> AppError {
+    let reason = if source.kind() == std::io::ErrorKind::PermissionDenied
+        || (cfg!(unix) && source.raw_os_error() == Some(1))
+    {
+        "access denied; check this app or terminal's permission to read the folder, then retry"
+    } else {
+        "the folder or file could not be read; check its availability and try again"
+    };
+    error(&format!(
+        "Cannot read the shared library at {}: {reason}.",
+        crate::display::sanitize_untrusted_path(path)
+    ))
+}
+
+fn archive_read_error(path: &Path, source: AppError) -> AppError {
+    match source {
+        AppError::Io { source, .. } | AppError::IoBare(source) => archive_io_error(path, source),
+        other => other,
+    }
+}
+
+/// An absent descendant is not proof that its existing iCloud ancestor is
+/// readable: macOS privacy controls can permit metadata but deny enumeration.
+/// Never interpret that case as an empty library. This probe performs no writes.
+pub(super) fn readable_directory(path: &Path) -> Result<bool> {
+    readable_directory_with(
+        path,
+        |p| std::fs::symlink_metadata(p).map(|m| m.is_dir() && !m.file_type().is_symlink()),
+        |p| std::fs::read_dir(p)?.next().transpose().map(|_| ()),
+    )
+}
+
+fn readable_directory_with(
+    path: &Path,
+    inspect: impl Fn(&Path) -> std::io::Result<bool>,
+    probe: impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<bool> {
+    for ancestor in path.ancestors() {
+        let ancestor = if ancestor.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            ancestor
+        };
+        match inspect(ancestor) {
+            Ok(true) => {
+                probe(ancestor).map_err(|err| archive_io_error(ancestor, err))?;
+                return Ok(ancestor == path);
+            }
+            Ok(false) => {
+                return Err(error(
+                    "A shared library path is not a regular directory; the library could not be inspected.",
+                ));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(archive_io_error(ancestor, err)),
+        }
+    }
+    Ok(false)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,40 +145,45 @@ pub fn validate_item(item: &LibraryItem) -> Result<()> {
 impl Archive {
     pub fn load(root: &Path) -> Result<Self> {
         let mut archive = Self::default();
-        let items = safe_child(root, "items")?;
-        if !items.try_exists()? {
+        if !readable_directory(root)? {
             return Ok(archive);
         }
-        if !items.symlink_metadata()?.is_dir() {
-            return Err(error("The library archive is not a directory."));
+        let items = safe_child(root, "items")?;
+        if !readable_directory(&items)? {
+            return Ok(archive);
         }
         let mut total = 0u64;
         let mut entries = 0usize;
-        for directory in std::fs::read_dir(&items)? {
+        for directory in std::fs::read_dir(&items).map_err(|err| archive_io_error(&items, err))? {
             entries += 1;
             if entries > MAX_REVISIONS {
                 return Err(error(
                     "The library exceeds the supported archive entry count.",
                 ));
             }
-            let directory = directory?;
+            let directory = directory.map_err(|err| archive_io_error(&items, err))?;
             let id = directory.file_name().to_string_lossy().into_owned();
             if id.starts_with('.') {
                 archive.pending += usize::from(id.ends_with(".icloud"));
                 continue;
             }
-            if uuid::Uuid::parse_str(&id).is_err() || !directory.file_type()?.is_dir() {
+            if uuid::Uuid::parse_str(&id).is_err()
+                || !directory
+                    .file_type()
+                    .map_err(|err| archive_io_error(&directory.path(), err))?
+                    .is_dir()
+            {
                 return Err(error("The library archive contains an unexpected entry."));
             }
             let folder = safe_child(&items, &id)?;
-            for entry in std::fs::read_dir(&folder)? {
+            for entry in std::fs::read_dir(&folder).map_err(|err| archive_io_error(&folder, err))? {
                 entries += 1;
                 if entries > MAX_REVISIONS {
                     return Err(error(
                         "The library exceeds the 10,000 revision limit; no revisions were discarded.",
                     ));
                 }
-                let entry = entry?;
+                let entry = entry.map_err(|err| archive_io_error(&folder, err))?;
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if name.starts_with('.') {
                     archive.pending += usize::from(name.ends_with(".icloud"));
@@ -131,14 +196,18 @@ impl Archive {
                     return Err(error("The library contains an invalid revision name."));
                 }
                 let path = safe_child(&folder, &name)?;
-                let size = path.symlink_metadata()?.len();
+                let size = path
+                    .symlink_metadata()
+                    .map_err(|err| archive_io_error(&path, err))?
+                    .len();
                 total = total.saturating_add(size);
                 if total > MAX_SCAN_BYTES {
                     return Err(error(
                         "The library exceeds the 128 MiB scan limit; no revisions were discarded.",
                     ));
                 }
-                let bytes = read_regular(&path, MAX_PACKAGE_BYTES)?;
+                let bytes = read_regular(&path, MAX_PACKAGE_BYTES)
+                    .map_err(|err| archive_read_error(&path, err))?;
                 if digest(&bytes) != hash {
                     archive.pending += 1;
                     continue;
@@ -262,5 +331,66 @@ impl Archive {
         }
         self.revisions.insert(revision.clone(), package);
         Ok(revision)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn missing_descendant_of_denied_archive_directory_is_not_empty() {
+        for denied in [
+            Error::new(ErrorKind::PermissionDenied, "PRIVATE_SENTINEL"),
+            #[cfg(unix)]
+            Error::from_raw_os_error(1),
+        ] {
+            let denied_kind = denied.kind();
+            let denied_code = denied.raw_os_error();
+            let result = readable_directory_with(
+                Path::new("/synthetic/private-library/not-delivered/items"),
+                |path| {
+                    if path == Path::new("/synthetic/private-library") {
+                        Ok(true)
+                    } else {
+                        Err(ErrorKind::NotFound.into())
+                    }
+                },
+                |_| {
+                    Err(if let Some(code) = denied_code {
+                        Error::from_raw_os_error(code)
+                    } else {
+                        Error::new(denied_kind, "PRIVATE_SENTINEL")
+                    })
+                },
+            );
+            let message = result.unwrap_err().to_string();
+            assert!(message.contains("access denied"));
+            assert!(message.contains("/synthetic/private-library"));
+            assert!(!message.contains("PRIVATE_SENTINEL"));
+        }
+    }
+
+    #[test]
+    fn denied_archive_metadata_is_not_treated_as_absent() {
+        let result = readable_directory_with(
+            Path::new("/synthetic/library"),
+            |_| Err(ErrorKind::PermissionDenied.into()),
+            |_| panic!("denied metadata must stop the probe"),
+        );
+        assert!(result.unwrap_err().to_string().contains("access denied"));
+    }
+
+    #[test]
+    fn genuinely_missing_readable_archive_stays_empty_without_writes() {
+        let t = tempfile::tempdir().unwrap();
+        assert!(
+            Archive::load(&t.path().join("not-created/archive"))
+                .unwrap()
+                .revisions
+                .is_empty()
+        );
+        assert_eq!(std::fs::read_dir(t.path()).unwrap().count(), 0);
     }
 }

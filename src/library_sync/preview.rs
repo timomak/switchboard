@@ -3,7 +3,7 @@ use super::{
     Paths, Settings, engine, mcp,
     model::*,
     native::NativeAdapter,
-    storage::{Archive, content_digest, error},
+    storage::{Archive, content_digest, error, readable_directory},
 };
 use crate::Result;
 use serde_json::{Value, json};
@@ -16,6 +16,7 @@ pub(super) fn plan(
     id: &str,
     targets: Option<BTreeSet<Target>>,
 ) -> Result<Value> {
+    let icloud_available = readable_directory(&paths.icloud)?;
     let archive = Archive::load(&paths.cloud)?;
     let mut state = engine::State::load(&paths.state())?;
     let catalog = engine::list(&paths.cloud)?;
@@ -35,8 +36,11 @@ pub(super) fn plan(
             false,
         )
     } else {
-        let targets = targets
-            .ok_or_else(|| error("For an inventory candidate, specify --targets explicitly."))?;
+        if uuid::Uuid::parse_str(id).is_ok() {
+            return Err(error(
+                "This library item was not found on this Mac. It may not have arrived or finished downloading from iCloud yet; verify delivery and try again.",
+            ));
+        }
         let candidate = adapter
             .inventory()?
             .into_iter()
@@ -44,6 +48,8 @@ pub(super) fn plan(
             .ok_or_else(|| {
                 error("This item changed or moved. Refresh inventory and choose it again.")
             })?;
+        let targets = targets
+            .ok_or_else(|| error("For this inventory candidate, specify --targets explicitly."))?;
         let (item, parents) = engine::selection(&archive, &candidate, targets)?;
         let source = json!({"target":candidate.source,"path":adapter.destination_path(candidate.source,&item,&candidate.locator)?});
         let library_id = (!parents.is_empty()).then(|| item.id.clone());
@@ -164,7 +170,7 @@ pub(super) fn plan(
         _ => item.requirements.clone(),
     };
     Ok(
-        json!({"read_only":true,"id":id,"library_id":library_id,"name":crate::display::sanitize_untrusted_line(&item.name),"kind":item.content.kind(),"targets":item.targets,"source":source,"would_publish_selection":publish,"category_enabled":category_enabled,"icloud_available":paths.available(),"pending_downloads":archive.pending,"conflicts":conflicts,"requirements":requirements,"destinations":rows,"message":"Read-only local snapshot; no files, permissions, ownership, authentication or shared revisions were changed. Recheck before applying. Published selections may also be installed by automatic sync on enabled Macs."}),
+        json!({"read_only":true,"id":id,"library_id":library_id,"name":crate::display::sanitize_untrusted_line(&item.name),"kind":item.content.kind(),"targets":item.targets,"source":source,"would_publish_selection":publish,"category_enabled":category_enabled,"icloud_available":icloud_available,"pending_downloads":archive.pending,"conflicts":conflicts,"requirements":requirements,"destinations":rows,"message":"Read-only local snapshot; no files, permissions, ownership, authentication or shared revisions were changed. Recheck before applying. Published selections may also be installed by automatic sync on enabled Macs."}),
     )
 }
 
@@ -229,6 +235,31 @@ mod tests {
             requirements: vec![],
         }
     }
+    #[test]
+    fn undelivered_library_id_reports_missing_delivery_without_candidate_instructions() {
+        let t = tempfile::tempdir().unwrap();
+        let paths = Paths::at(t.path().into());
+        let ready = |_| panic!("An unknown library ID must not inspect native readiness");
+        let mut adapter = NativeAdapter::new(
+            roots(t.path()),
+            paths.local.join("native"),
+            BTreeMap::new(),
+            &ready,
+        );
+        let result = plan(
+            &paths,
+            &Settings::default(),
+            &mut adapter,
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("not found on this Mac"));
+        assert!(message.contains("iCloud"));
+        assert!(!message.contains("--targets"));
+        assert!(snapshot(t.path()).is_empty());
+    }
+
     #[test]
     fn no_sync_adoption_while_paused_publishes_only_selection_and_keeps_native_files() {
         let t = tempfile::tempdir().unwrap();
