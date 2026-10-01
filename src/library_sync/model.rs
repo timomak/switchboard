@@ -128,6 +128,8 @@ pub struct RunReport {
 /// Native writers must compare the current portable digest to `expected`
 /// immediately before replacing anything, in addition to client readiness.
 pub trait Adapter {
+    /// A scoped run may recover native journals only for this item identity.
+    fn limit_recovery_to(&mut self, _item_id: Option<&str>) {}
     fn ready(&self, _target: Target) -> crate::Result<bool> {
         Ok(true)
     }

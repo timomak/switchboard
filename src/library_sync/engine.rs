@@ -39,6 +39,13 @@ impl Default for State {
     }
 }
 impl State {
+    pub fn has_pending(&self, item_id: &str, target: Target, locator: &str) -> bool {
+        self.pending.iter().any(|p| {
+            p.receipt.item_id == item_id
+                && p.receipt.target == target
+                && p.receipt.locator == locator
+        })
+    }
     pub fn load(path: &Path) -> Result<Self> {
         if !path.try_exists()? {
             return Ok(Self::default());
@@ -79,6 +86,24 @@ pub fn select(
     candidate: &InventoryCandidate,
     targets: BTreeSet<Target>,
 ) -> Result<LibraryItem> {
+    let mut archive = Archive::load(root)?;
+    let (item, parents) = selection(&archive, candidate, targets)?;
+    let revision = if parents.len() == 1 && archive.revisions[&parents[0]].item == item {
+        parents[0].clone()
+    } else {
+        archive.publish(root, item.clone(), parents)?
+    };
+    record_selection(state, &item, candidate, revision)?;
+    state.save(state_path)?;
+    Ok(item)
+}
+
+/// Read-only preparation shared by adoption and the local plan.
+pub fn selection(
+    archive: &Archive,
+    candidate: &InventoryCandidate,
+    targets: BTreeSet<Target>,
+) -> Result<(LibraryItem, Vec<String>)> {
     if candidate.classification != "custom" {
         return Err(error("Only custom items can be selected for this library."));
     }
@@ -86,7 +111,6 @@ pub fn select(
         .content
         .clone()
         .ok_or_else(|| error("This item has no supported portable definition."))?;
-    let mut archive = Archive::load(root)?;
     if archive.pending > 0 {
         return Err(error(
             "Wait for the library to finish downloading before selecting items.",
@@ -121,11 +145,15 @@ pub fn select(
     };
     item.targets.extend(targets);
     item.enabled = true;
-    let revision = if parents.len() == 1 && archive.revisions[&parents[0]].item == item {
-        parents[0].clone()
-    } else {
-        archive.publish(root, item.clone(), parents)?
-    };
+    Ok((item, parents))
+}
+
+pub fn record_selection(
+    state: &mut State,
+    item: &LibraryItem,
+    candidate: &InventoryCandidate,
+    revision: String,
+) -> Result<()> {
     if item.targets.contains(&candidate.source) && candidate.source != Target::Cowork {
         let receipt = Receipt {
             item_id: item.id.clone(),
@@ -141,8 +169,7 @@ pub fn select(
             state.record(receipt);
         }
     }
-    state.save(state_path)?;
-    Ok(item)
+    Ok(())
 }
 
 pub fn update(
@@ -220,17 +247,39 @@ fn list_archive(archive: &Archive) -> Vec<ItemStatus> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn recover(
     root: &Path,
     state_path: &Path,
     state: &mut State,
     archive: &mut Archive,
     enabled_kinds: &BTreeSet<Kind>,
+    selected: Option<&str>,
     adapter: &mut impl Adapter,
 ) -> Result<BTreeSet<(String, Target, String)>> {
     let mut blocked = BTreeSet::new();
+    if let Some(id) = selected {
+        for pending in &state.pending {
+            let receipt = &pending.receipt;
+            if receipt.item_id == id {
+                continue;
+            }
+            // MCP entries share one native configuration file. Do not let a
+            // selected apply recover another item's interrupted file swap.
+            blocked.insert((id.to_owned(), receipt.target, receipt.locator.clone()));
+        }
+    }
     for pending in state.pending.clone() {
         let receipt = &pending.receipt;
+        if selected.is_some_and(|id| receipt.item_id != id)
+            || blocked.contains(&(
+                receipt.item_id.clone(),
+                receipt.target,
+                receipt.locator.clone(),
+            ))
+        {
+            continue;
+        }
         let Some(package) = archive.revisions.get(&receipt.revision).cloned() else {
             blocked.insert((
                 receipt.item_id.clone(),
@@ -302,7 +351,24 @@ pub fn run(
     enabled_kinds: &BTreeSet<Kind>,
     adapter: &mut impl Adapter,
 ) -> Result<RunReport> {
+    run_selected(root, state_path, state, enabled_kinds, adapter, None)
+}
+
+pub fn run_selected(
+    root: &Path,
+    state_path: &Path,
+    state: &mut State,
+    enabled_kinds: &BTreeSet<Kind>,
+    adapter: &mut impl Adapter,
+    selected: Option<&str>,
+) -> Result<RunReport> {
+    adapter.limit_recovery_to(selected);
     let mut archive = Archive::load(root)?;
+    if selected.is_some_and(|id| archive.heads(id).is_empty()) {
+        return Err(error(
+            "This library item is unavailable; no items were synced.",
+        ));
+    }
     let mut report = RunReport {
         pending: archive.pending,
         ..RunReport::default()
@@ -313,11 +379,15 @@ pub fn run(
         state,
         &mut archive,
         enabled_kinds,
+        selected,
         adapter,
     )?;
     // Export every independent local edit before deciding which cloud head
     // may be installed. This is essential for account and Mac conflicts.
     for receipt in state.receipts.clone() {
+        if selected.is_some_and(|id| receipt.item_id != id) {
+            continue;
+        }
         if blocked.contains(&(
             receipt.item_id.clone(),
             receipt.target,
@@ -366,6 +436,9 @@ pub fn run(
     }
     report.items = list_archive(&archive);
     let catalog = report.items.clone();
+    report
+        .items
+        .retain(|s| selected.is_none_or(|id| s.item.id == id));
     for status in &mut report.items {
         let item = &status.item;
         if !enabled_kinds.contains(&item.content.kind()) {

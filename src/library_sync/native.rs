@@ -41,6 +41,7 @@ pub struct NativeAdapter<'a> {
     bindings: BTreeMap<String, String>,
     ready: &'a dyn Fn(Target) -> Result<bool>,
     destinations: BTreeMap<String, Destination>,
+    recovery_scope: Option<String>,
 }
 
 fn hash(bytes: &[u8]) -> String {
@@ -154,6 +155,8 @@ struct PendingStamp {
 #[serde(deny_unknown_fields)]
 struct Journal {
     version: u32,
+    #[serde(default)]
+    item_id: Option<String>,
     target: PathBuf,
     kind: Kind,
     before: Option<String>,
@@ -228,6 +231,7 @@ impl<'a> NativeAdapter<'a> {
             bindings,
             ready,
             destinations: BTreeMap::new(),
+            recovery_scope: None,
         }
     }
     fn register(&mut self, target: Target, kind: Kind, path: PathBuf) -> String {
@@ -383,6 +387,11 @@ impl<'a> NativeAdapter<'a> {
         }
         skills::no_symlink(&dir)?;
         if missing(&dir.join("journal.json"))? {
+            if self.recovery_scope.is_some() {
+                return Err(error(
+                    "An unidentified interrupted operation needs a full sync or manual review; scoped sync preserved its journal.",
+                ));
+            }
             if missing(&dir.join("old"))? {
                 remove_path(&dir)?;
                 sync_dir(dir.parent().unwrap())?;
@@ -397,6 +406,15 @@ impl<'a> NativeAdapter<'a> {
             serde_json::from_slice(&bytes).map_err(|_| error("invalid local recovery journal"))?;
         if journal.version != 1 || journal.target != dest.path || journal.kind != dest.kind {
             return Err(error("invalid local recovery destination"));
+        }
+        if self
+            .recovery_scope
+            .as_ref()
+            .is_some_and(|id| journal.item_id.as_ref() != Some(id))
+        {
+            return Err(error(
+                "An interrupted operation belongs to another item or an older journal. Scoped sync preserved it; use a full sync or review its recovery state.",
+            ));
         }
         let current = raw_hash(&dest.path, dest.kind)?;
         let backup = raw_hash(&dir.join("old"), dest.kind)?;
@@ -432,6 +450,7 @@ impl<'a> NativeAdapter<'a> {
             "native content changed after an interruption; current content and recovery copies were retained",
         ))
     }
+    #[allow(clippy::too_many_arguments)]
     fn replace(
         &self,
         dest: &Destination,
@@ -439,6 +458,7 @@ impl<'a> NativeAdapter<'a> {
         files: Option<&[super::model::SkillFile]>,
         bytes: Option<&[u8]>,
         stamp: Option<PendingStamp>,
+        item_id: &str,
     ) -> Result<bool> {
         self.recover(dest)?;
         let dir = self.journal_path(dest);
@@ -455,6 +475,7 @@ impl<'a> NativeAdapter<'a> {
                 &dir.join("journal.json"),
                 &serde_json::to_vec(&Journal {
                     version: 1,
+                    item_id: Some(item_id.to_owned()),
                     target: dest.path.clone(),
                     kind: dest.kind,
                     before: before.clone(),
@@ -603,6 +624,114 @@ impl<'a> NativeAdapter<'a> {
             .map(|id| (id, slots.clone()))
             .collect())
     }
+
+    /// Local-only metadata. Never include native definitions or binding values.
+    pub fn preview_destination(
+        &mut self,
+        item: &LibraryItem,
+        target: Target,
+        locator: &str,
+    ) -> Result<Value> {
+        let dest = self.resolve(target, item, locator)?;
+        let ready = self.ready(target)?;
+        let pending = !missing(&self.journal_path(&dest))?;
+        let mut result = json!({"target":target,"path":dest.path,"app_stopped":ready,
+            "action":"none","state":"ready","requirements":[],"required_bindings":[]});
+        if pending {
+            result["action"] = json!("recover_then_replan");
+            result["state"] = json!("conflict");
+            result["detail"] = json!(
+                "An interrupted native operation needs recovery; preview does not recover or write files."
+            );
+            return Ok(result);
+        }
+        let observed = self.inspect(target, item, locator)?;
+        if !item.active() {
+            if let Some(observed) = &observed {
+                let owned = if dest.kind == Kind::Mcp {
+                    let entries = native_entries(&dest.path, target)?;
+                    if let Some(entry) = entries.get(&item.name) {
+                        let entry_hash = hash(&serde_json::to_vec(entry)?);
+                        self.read_stamp(locator, &item.name)?
+                            .is_some_and(|s| s.entry_hash == entry_hash)
+                    } else {
+                        false
+                    }
+                } else {
+                    let digest = content_digest(observed)?;
+                    self.read_stamp(locator, &item.name)?
+                        .is_some_and(|s| s.entry_hash == digest)
+                };
+                result["action"] = json!(if owned { "remove" } else { "preserve" });
+                if !owned {
+                    result["state"] = json!("conflict");
+                    result["detail"] = json!(
+                        "The existing item is unowned or changed locally; removal will be skipped."
+                    );
+                }
+            }
+        } else if let Content::Mcp { definition } = &item.content {
+            let entries = native_entries(&dest.path, target)?;
+            let entry = entries.get(&item.name);
+            let slots = mcp::binding_slots(definition)?;
+            let bindings = slots
+                .iter()
+                .filter_map(|slot| {
+                    self.bindings
+                        .get(&binding_key(&item.id, locator, slot))
+                        .map(|v| (slot.clone(), v.clone()))
+                })
+                .collect();
+            let rendered = mcp::render(definition, target, entry, &bindings)?;
+            result["required_bindings"] = json!(slots);
+            result["requirements"] = json!(rendered.requirements);
+            if let Some(native) = rendered.native {
+                result["action"] = json!(if entry == Some(&native) {
+                    "keep"
+                } else if entry.is_some() {
+                    "update"
+                } else {
+                    "create"
+                });
+                result["state"] = json!(if native.get("enabled").and_then(Value::as_bool)
+                    == Some(false)
+                {
+                    "needs_setup"
+                } else if rendered.remote {
+                    "sign_in_needed"
+                } else {
+                    "ready"
+                });
+            } else {
+                result["state"] = json!("needs_setup");
+            }
+        } else {
+            result["action"] = json!(if observed.as_ref() == Some(&item.content) {
+                "keep"
+            } else if observed.is_some() {
+                "update"
+            } else {
+                "create"
+            });
+            result["requirements"] = json!(skills::requirements(&item.content, target)?);
+        }
+        if !ready && result["state"] != "conflict" {
+            result["state"] = json!("waiting_for_app");
+            result["detail"] = json!(
+                "Close the app and its CLI sessions before applying; preview leaves them running."
+            );
+        }
+        Ok(result)
+    }
+
+    pub fn destination_path(
+        &mut self,
+        target: Target,
+        item: &LibraryItem,
+        locator: &str,
+    ) -> Result<PathBuf> {
+        Ok(self.resolve(target, item, locator)?.path)
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // Inventory metadata has no native payload or path in diagnostics.
@@ -722,6 +851,9 @@ fn edit_native(
 }
 
 impl Adapter for NativeAdapter<'_> {
+    fn limit_recovery_to(&mut self, item_id: Option<&str>) {
+        self.recovery_scope = item_id.map(str::to_owned);
+    }
     fn ready(&self, target: Target) -> Result<bool> {
         (self.ready)(target)
     }
@@ -845,7 +977,7 @@ impl Adapter for NativeAdapter<'_> {
                         false,
                     ));
                 }
-                if !self.replace(&dest, before, None, None, None)? {
+                if !self.replace(&dest, before, None, None, None, &item.id)? {
                     return Ok(outcome(
                         InstallStatus::WaitingForApp,
                         "The app opened during installation; retry after it closes.",
@@ -873,6 +1005,7 @@ impl Adapter for NativeAdapter<'_> {
                         item,
                         &content_digest(&item.content)?,
                     )),
+                    &item.id,
                 )?
             {
                 return Ok(outcome(
@@ -979,7 +1112,7 @@ impl Adapter for NativeAdapter<'_> {
             pending_stamp = None;
         }
         if Some(hash(&bytes)) != before
-            && !self.replace(&dest, before, None, Some(&bytes), pending_stamp)?
+            && !self.replace(&dest, before, None, Some(&bytes), pending_stamp, &item.id)?
         {
             return Ok(outcome(
                 InstallStatus::WaitingForApp,
@@ -1449,6 +1582,7 @@ mod tests {
             &dir.join("journal.json"),
             &serde_json::to_vec(&Journal {
                 version: 1,
+                item_id: None,
                 target: target.clone(),
                 kind: Kind::Skill,
                 before,
@@ -1512,6 +1646,7 @@ mod tests {
             &dir.join("journal.json"),
             &serde_json::to_vec(&Journal {
                 version: 1,
+                item_id: None,
                 target: dest.path.clone(),
                 kind: Kind::Skill,
                 before: before.clone(),
@@ -1585,6 +1720,7 @@ mod tests {
             &dir.join("journal.json"),
             &serde_json::to_vec(&Journal {
                 version: 1,
+                item_id: None,
                 target: dest.path.clone(),
                 kind: Kind::Mcp,
                 before: None,
@@ -1602,6 +1738,65 @@ mod tests {
         );
         assert!(!dir.exists());
     }
+    #[test]
+    fn preview_and_scoped_run_preserve_unrelated_or_legacy_native_journals_without_receipts() {
+        let t = tempfile::tempdir().unwrap();
+        let ready = |_| Ok(true);
+        let mut adapter = NativeAdapter::new(
+            roots(t.path()),
+            t.path().join("local"),
+            BTreeMap::new(),
+            &ready,
+        );
+        let mut item = skill();
+        item.content = Content::Mcp {
+            definition: mcp::normalize(
+                &json!({"url":"https://selected.example/mcp"}),
+                Target::Codex,
+            )
+            .unwrap(),
+        };
+        let locator = adapter
+            .destinations(Target::Codex, &item)
+            .unwrap()
+            .remove(0);
+        let dest = adapter.resolve(Target::Codex, &item, &locator).unwrap();
+        let dir = adapter.journal_path(&dest);
+        private_dir(&dir).unwrap();
+        private_dir(dest.path.parent().unwrap()).unwrap();
+        let backup = b"# Unrelated original configuration\nmodel='preserved'\n";
+        write_private(&dir.join("old"), backup, false).unwrap();
+        for owner in [None, Some(uuid::Uuid::new_v4().to_string())] {
+            let journal = serde_json::to_vec(&Journal {
+                version: 1,
+                item_id: owner,
+                target: dest.path.clone(),
+                kind: Kind::Mcp,
+                before: Some(hash(backup)),
+                after: Some("synthetic-after".into()),
+                stamp: None,
+            })
+            .unwrap();
+            fs::write(dir.join("journal.json"), &journal).unwrap();
+            let plan = adapter
+                .preview_destination(&item, Target::Codex, &locator)
+                .unwrap();
+            assert_eq!(plan["action"], "recover_then_replan");
+            adapter.limit_recovery_to(Some(&item.id));
+            assert!(adapter.apply(Target::Codex, &item, &locator, None).is_err());
+            assert_eq!(fs::read(dir.join("old")).unwrap(), backup);
+            assert_eq!(fs::read(dir.join("journal.json")).unwrap(), journal);
+            assert!(!dest.path.exists());
+        }
+        // Full sync retains the existing recovery path for legacy journals.
+        adapter.limit_recovery_to(None);
+        adapter
+            .recover_pending(Target::Codex, &item, &locator)
+            .unwrap();
+        assert_eq!(fs::read(&dest.path).unwrap(), backup);
+        assert!(!dir.exists());
+    }
+
     #[test]
     #[ignore = "Starts an installed official client against synthetic roots only"]
     fn installed_codex_discovers_installed_skill_and_supporting_files() {

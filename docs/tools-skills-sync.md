@@ -78,6 +78,43 @@ BACKEND=/Applications/Switchboard.app/Contents/Resources/bin/ai-usagebar
 "$BACKEND" library-sync run --json
 ```
 
+For a cautious single-item CLI transfer, inspect an inventory candidate before
+publishing it:
+
+```sh
+"$BACKEND" library-sync plan CANDIDATE_ID --targets codex,claude-code --json
+"$BACKEND" library-sync adopt CANDIDATE_ID --targets codex,claude-code --no-sync --json
+# Use the adopted_item ID returned by adopt, including when it reused an existing item.
+"$BACKEND" library-sync plan LIBRARY_ID --json
+"$BACKEND" library-sync run --item LIBRARY_ID --json
+```
+
+`plan` is read-only: it does not create files, change permissions, recover pending
+writes, publish definitions, authenticate or stop apps. Its local JSON lists the
+exact source and per-account destination paths, intended native changes,
+conflicts, app readiness and required binding slot names. It omits definition and
+credential values; paths still identify local accounts, so keep the output
+private. A plan is a snapshot, not a reservation. Apply rechecks process
+readiness, ownership and concurrent native changes. Local edits and interrupted
+operations may require review or recovery followed by another plan.
+An unreadable iCloud directory reports access denied with its local path rather
+than appearing as an empty library. A missing library ID reports that delivery
+may still be pending; it does not ask for inventory-candidate targets.
+
+`--no-sync` permits adopting while the category is paused and leaves it paused,
+but **still publishes the selection to iCloud**. Automatic sync on any
+enabled Mac can then install it once its clients are closed. Pause automatic sync
+or use an isolated fixture before a controlled pilot; this flag is not a global
+pause. `run --item` limits recovery, local-edit publication and installation to
+that item and does not update the Cowork export. Other selected items, their
+receipts and their pending operations remain untouched. An unrelated pending
+write to the same native MCP config blocks that destination until recovered by
+its owning item or a normal full sync. Native journals without an item identity
+require a normal full sync or manual review; a scoped run leaves them intact.
+Regular `run` and the UI retain their
+whole-library behavior. Enabling a category and adopting without `--no-sync`
+retain their existing behavior as well.
+
 Environment references must be available to the Switchboard backend. Existing
 destination-native credentials take precedence. The binding command applies to
 configured homes of the selected app; configure an account directly in its native
