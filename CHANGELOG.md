@@ -86,6 +86,10 @@ Each release is also published at
 
 ### Fixed
 
+- Stop the macOS status item's appearance observer from triggering continuous
+  menu-bar redraws and high idle CPU. Reuse the template icon, skip unchanged
+  presentation updates, and preserve the compact layout when hiding the title.
+
 - MCP sync keeps local bindings separate for each item, destination and slot,
   preventing one server's paths from overwriting another's. Existing native
   values are preserved; ambiguous older bindings require explicit rebinding.

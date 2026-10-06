@@ -26,7 +26,7 @@ cp "$DIR/assets/switchboard/Switchboard-menubar.pdf" "$TEST_APP/Contents/Resourc
 echo "Compiling status-item GUI regression harness…"
 swiftc -O -parse-as-library -D SWIFT_TEST_HARNESS \
   "$DIR/ai-usagebar-menubar.swift" "$DIR/account-switchboard.swift" \
-  "$DIR/chat-sync-ui.swift" "$DIR/library-sync-ui.swift" \
+  "$DIR/library-sync-ui.swift" \
   "$DIR/continuation-core.swift" "$DIR/continuation-native.swift" \
   "$DIR/continuation-discovery.swift" "$DIR/continuation-ui.swift" \
   "$DIR/continuation-project.swift" "$DIR/continuation-project-ui.swift" \
