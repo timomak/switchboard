@@ -2271,6 +2271,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func observeAppearanceChanges() {
+        // Switchboard uses a template image and a native title; AppKit adapts
+        // both without an application repaint. Replicant snapshots temporarily
+        // change the button's appearance and restore it. Observing those changes
+        // and rewriting the icon creates a self-sustaining redraw loop.
+        guard !usesSwitchboard else { return }
         guard let button = statusItem.button else { return }
         lastAppearanceName = button.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
         appearanceObservation = button.observe(\NSStatusBarButton.effectiveAppearance,
@@ -2288,7 +2293,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func rerenderAppearance() {
-        if usesSwitchboard { updateBoardIcon(); return }
+        if usesSwitchboard { return }
         // Appearance only changes colors; the configured-vendor set is unchanged,
         // so repaint without rebuilding the (subprocess-touching) submenu.
         if VENDOR == "overview", let ov = lastOverview { renderOverview(ov, rebuildSubmenu: false); return }
