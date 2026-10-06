@@ -49,6 +49,7 @@ require configuring its binary path to the Switchboard backend.
 cd macos
 ./build.sh                 # swiftc -O → ./ai-usagebar-menubar
 ./run-tests.sh             # optional: pure-logic test harness
+./run-status-item-tests.sh # optional: bounded status-item/idle-CPU test (GUI session)
 ./ai-usagebar-menubar &    # appears in the menu bar (no Dock icon)
 ```
 

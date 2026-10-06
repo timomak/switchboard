@@ -403,6 +403,18 @@ struct AccountSwitchboard: View {
     }
 }
 
+private enum BoardMenuBarIcon {
+    // Configure before assigning to the button. Replacing or mutating an image
+    // already on a status item invalidates AppKit's menu-bar replicant snapshots.
+    static let image: NSImage? = {
+        let image = Bundle.main.url(forResource: "Switchboard-menubar", withExtension: "pdf")
+            .flatMap { NSImage(contentsOf: $0) }
+        image?.size = NSSize(width: 22, height: 22)
+        image?.isTemplate = true
+        return image
+    }()
+}
+
 extension AppDelegate {
     func configureSwitchboard() {
         statusItem.menu = nil
@@ -459,15 +471,19 @@ extension AppDelegate {
 
     func updateBoardIcon() {
         guard let button = statusItem.button else { return }
-        button.image = Bundle.main.url(forResource: "Switchboard-menubar", withExtension: "pdf").flatMap { NSImage(contentsOf: $0) }
-        button.image?.size = NSSize(width: 22, height: 22)
-        button.image?.isTemplate = true
+        if button.image !== BoardMenuBarIcon.image { button.image = BoardMenuBarIcon.image }
         let compact = DEF.bool(forKey: "boardIconOnly")
-        statusItem.length = compact ? NSStatusItem.squareLength : NSStatusItem.variableLength
-        button.imagePosition = compact ? .imageOnly : .imageLeading
-        button.imageScaling = .scaleProportionallyDown
-        button.attributedTitle = NSAttributedString(string: compact ? "" : "  Switchboard")
-        button.toolTip = SWITCHBOARD_PREVIEW ? "Switchboard preview · Claude and Codex accounts" : "Switchboard · Claude and Codex accounts"
+        let length = compact ? NSStatusItem.squareLength : NSStatusItem.variableLength
+        if statusItem.length != length { statusItem.length = length }
+        let title = NSAttributedString(string: compact ? "" : "  Switchboard")
+        if !button.attributedTitle.isEqual(to: title) { button.attributedTitle = title }
+        // Clearing a title can change AppKit's image position; apply the desired
+        // layout afterwards so expanded → compact also settles in imageOnly.
+        let imagePosition: NSControl.ImagePosition = compact ? .imageOnly : .imageLeading
+        if button.imagePosition != imagePosition { button.imagePosition = imagePosition }
+        if button.imageScaling != .scaleProportionallyDown { button.imageScaling = .scaleProportionallyDown }
+        let toolTip = SWITCHBOARD_PREVIEW ? "Switchboard preview · Claude and Codex accounts" : "Switchboard · Claude and Codex accounts"
+        if button.toolTip != toolTip { button.toolTip = toolTip }
     }
 
     func refreshSwitchboard() {
